@@ -1,0 +1,21 @@
+[build]
+  builder = "dockerfile"
+  dockerfilePath = "Dockerfile"
+
+[deploy]
+  # Health check — Railway will use this to determine when the service is ready
+  healthcheckPath = "/api/v1/info"
+  healthcheckPort = 8099
+  restartPolicyType = "ON_FAILURE"
+  restartPolicyRetries = 3
+
+[volumes]
+  # Persistent storage for chain database and wallet — survives redeployments
+  # Railway automatically provisions and attaches a volume at this mount point
+  persist = true
+
+# Environment variables
+# PORT is set automatically by Railway — the Arobi node reads it from std::env::var("PORT")
+# RUST_LOG controls log verbosity
+[environment]
+  RUST_LOG = "info"

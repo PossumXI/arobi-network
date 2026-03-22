@@ -1,0 +1,11 @@
+# Railway-specific: reset all exclusions then whitelist everything needed
+!*
+
+# Then exclude only what we truly don't need
+target/
+.git/
+*.log
+*.exe
+.env
+scripts/
+*.md

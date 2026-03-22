@@ -1,0 +1,93 @@
+[package]
+name = "arobi-network"
+version = "3.2.0"
+edition = "2021"
+description = "Arobi Network — Decentralized Collective Intelligence Blockchain Node with Proof of Intelligence"
+authors = ["Arobi Technology Alliance"]
+license = "MIT"
+
+[[bin]]
+name = "arobi-network"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+bincode = "1"
+
+# Cryptography — Ed25519 signing, SHA-256, Blake3, Keccak
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+sha2 = "0.10"
+sha3 = "0.10"
+blake3 = "1"
+rand = "0.8"
+hex = "0.4"
+
+# Persistent storage (pure Rust embedded KV)
+sled = "0.34"
+
+# HTTP API
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling & logging
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# PoI consensus + agents
+async-trait = "0.1"
+dashmap = "6"
+parking_lot = "0.12"
+
+# ArobiFS — distributed file system
+reed-solomon-erasure = "6"
+zstd = "0.13"
+base64 = "0.22"
+
+# Tool executor — URL encoding for web search
+urlencoding = "2"
+
+# ArobiLLM — decentralized language model
+candle-core = "0.8"
+candle-nn = "0.8"
+safetensors = "0.4"
+half = "2"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+
+# HTTP client — LLM proxy + firecrawler
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Firecrawler agent (threat intelligence) — behind feature gate
+scraper = { version = "0.22", optional = true }
+async-stream = "0.3.6"
+
+[features]
+default = ["firecrawler"]
+firecrawler = ["scraper"]
+gpu = ["candle-core/cuda"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+opt-level = 1
+debug = true
