@@ -92,23 +92,40 @@ pub struct BlockchainInfo {
 pub fn format_for_court(entries: &[super::TribunalFormat]) -> String {
     let mut report = String::new();
 
-    report.push_str("================================================================================\n");
+    report.push_str(
+        "================================================================================\n",
+    );
     report.push_str("                    AI DECISION AUDIT REPORT - COURT SUBMISSION\n");
-    report.push_str("================================================================================\n\n");
-    report.push_str(&format!("Report Generated: {}\n", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")));
+    report.push_str(
+        "================================================================================\n\n",
+    );
+    report.push_str(&format!(
+        "Report Generated: {}\n",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+    ));
     report.push_str(&format!("Total Entries: {}\n\n", entries.len()));
 
-    report.push_str("================================================================================\n");
+    report.push_str(
+        "================================================================================\n",
+    );
     report.push_str("                              CHAIN INTEGRITY\n");
-    report.push_str("================================================================================\n\n");
+    report.push_str(
+        "================================================================================\n\n",
+    );
     report.push_str("This report contains cryptographically linked audit entries.\n");
-    report.push_str("Each entry contains a hash of the previous entry, creating an immutable chain.\n");
+    report.push_str(
+        "Each entry contains a hash of the previous entry, creating an immutable chain.\n",
+    );
     report.push_str("Any tampering with historical entries will result in hash mismatch.\n\n");
 
     for (i, entry) in entries.iter().enumerate() {
-        report.push_str("--------------------------------------------------------------------------------\n");
+        report.push_str(
+            "--------------------------------------------------------------------------------\n",
+        );
         report.push_str(&format!("CASE #{}\n", i + 1));
-        report.push_str("--------------------------------------------------------------------------------\n\n");
+        report.push_str(
+            "--------------------------------------------------------------------------------\n\n",
+        );
 
         report.push_str(&format!("Case Number: {}\n", entry.case_number));
         report.push_str(&format!("Date/Time: {}\n", entry.hearing_date));
@@ -138,7 +155,10 @@ pub fn format_for_court(entries: &[super::TribunalFormat]) -> String {
         }
 
         report.push_str("ETHICS VALIDATION:\n");
-        report.push_str(&format!("  Approved: {}\n", if entry.ethics_approval { "YES" } else { "NO" }));
+        report.push_str(&format!(
+            "  Approved: {}\n",
+            if entry.ethics_approval { "YES" } else { "NO" }
+        ));
         if let Some(ref details) = entry.ethics_details {
             report.push_str(&format!("  Details: {}\n", details));
         }
@@ -163,7 +183,14 @@ pub fn format_for_court(entries: &[super::TribunalFormat]) -> String {
         report.push_str(&format!("  Latency: {}\n\n", entry.latency_ms));
 
         report.push_str("INTEGRITY:\n");
-        report.push_str(&format!("  Verified: {}\n", if entry.integrity_verified { "YES" } else { "NO - WARNING: COMPROMISED" }));
+        report.push_str(&format!(
+            "  Verified: {}\n",
+            if entry.integrity_verified {
+                "YES"
+            } else {
+                "NO - WARNING: COMPROMISED"
+            }
+        ));
         report.push_str(&format!("  Block Height: {}\n", entry.block_height));
         report.push_str(&format!("  Entry Hash: {}\n", entry.entry_hash));
         report.push_str(&format!("  Previous Hash: {}\n\n", entry.previous_hash));
@@ -177,9 +204,13 @@ pub fn format_for_court(entries: &[super::TribunalFormat]) -> String {
         }
     }
 
-    report.push_str("================================================================================\n");
+    report.push_str(
+        "================================================================================\n",
+    );
     report.push_str("                              END OF REPORT\n");
-    report.push_str("================================================================================\n");
+    report.push_str(
+        "================================================================================\n",
+    );
 
     report
 }
@@ -191,10 +222,18 @@ pub fn format_for_forensics(entries: &[super::TribunalFormat]) -> ForensicReport
         generated_at: chrono::Utc::now().to_rfc3339(),
         entries: entries.to_vec(),
         integrity: ForensicIntegrity {
-            chain_verified: entries.windows(2).all(|w| w[0].entry_hash == w[1].previous_hash || w[1].previous_hash == "0".repeat(64)),
+            chain_verified: entries.windows(2).all(|w| {
+                w[0].entry_hash == w[1].previous_hash || w[1].previous_hash == "0".repeat(64)
+            }),
             total_entries: entries.len(),
-            first_hash: entries.first().map(|e| e.entry_hash.clone()).unwrap_or_default(),
-            last_hash: entries.last().map(|e| e.entry_hash.clone()).unwrap_or_default(),
+            first_hash: entries
+                .first()
+                .map(|e| e.entry_hash.clone())
+                .unwrap_or_default(),
+            last_hash: entries
+                .last()
+                .map(|e| e.entry_hash.clone())
+                .unwrap_or_default(),
         },
     }
 }

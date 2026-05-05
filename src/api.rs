@@ -18,7 +18,6 @@ use tracing::info;
 
 use crate::agents::inference_router::InferenceRouterAgent;
 use crate::agents::tool_executor::ToolExecutorAgent;
-use ed25519_dalek::Signer;
 use crate::audit::ledger::{AuditLedger, DecisionSource, DecisionType, TribunalFormat};
 use crate::block::{Block, Transaction};
 use crate::compute::reputation::ReputationOracle;
@@ -38,6 +37,7 @@ use crate::poi::PoiEngine;
 use crate::rate_limit::rate_limit_middleware;
 use crate::security::SecurityMonitor;
 use crate::store::Store;
+use ed25519_dalek::Signer;
 
 // ─── Shared state ──────────────────────────────────────────────────────────────
 
@@ -755,7 +755,10 @@ async fn get_info(State(s): State<AppState>) -> ApiResult<NodeInfo> {
     let mempool_size = s.mempool.size().await;
     let peer_count = s.p2p.peer_count();
 
-    let ops_pool_balance = s.store.get_balance(genesis::NODE_OPS_POOL_ADDRESS).unwrap_or(0);
+    let ops_pool_balance = s
+        .store
+        .get_balance(genesis::NODE_OPS_POOL_ADDRESS)
+        .unwrap_or(0);
     let current_reward = genesis::current_block_reward(height, ops_pool_balance);
 
     Ok(Json(NodeInfo {
@@ -797,7 +800,10 @@ async fn get_tokenomics(State(s): State<AppState>) -> ApiResult<TokenomicsResp> 
 
     let height = s.store.chain_height().unwrap_or(0);
     let halving_exp = genesis::halving_exp(height);
-    let ops_pool_balance = s.store.get_balance(genesis::NODE_OPS_POOL_ADDRESS).unwrap_or(0);
+    let ops_pool_balance = s
+        .store
+        .get_balance(genesis::NODE_OPS_POOL_ADDRESS)
+        .unwrap_or(0);
     let current_reward = genesis::current_block_reward(height, ops_pool_balance);
 
     Ok(Json(TokenomicsResp {
@@ -807,15 +813,19 @@ async fn get_tokenomics(State(s): State<AppState>) -> ApiResult<TokenomicsResp> 
         genesis_timestamp_ms: genesis::TIMESTAMP_MS,
         founder: AllocationInfo {
             address: genesis::FOUNDER_ADDRESS.to_string(),
-            genesis_allocation_aura: genesis::FOUNDER_GENESIS_ALLOCATION as f64 / genesis::DECIMAL_FACTOR as f64,
-            vesting_total_aura: genesis::FOUNDER_VESTING_TOTAL as f64 / genesis::DECIMAL_FACTOR as f64,
+            genesis_allocation_aura: genesis::FOUNDER_GENESIS_ALLOCATION as f64
+                / genesis::DECIMAL_FACTOR as f64,
+            vesting_total_aura: genesis::FOUNDER_VESTING_TOTAL as f64
+                / genesis::DECIMAL_FACTOR as f64,
             vesting_vested_aura: founder_vested as f64 / genesis::DECIMAL_FACTOR as f64,
-            vesting_months_remaining: genesis::FOUNDER_VESTING_MONTHS.saturating_sub(months_elapsed),
+            vesting_months_remaining: genesis::FOUNDER_VESTING_MONTHS
+                .saturating_sub(months_elapsed),
             vesting_end_ms,
         },
         mission_treasury: AllocationInfo {
             address: genesis::MISSION_TREASURY_ADDRESS.to_string(),
-            genesis_allocation_aura: genesis::MISSION_TREASURY_ALLOCATION as f64 / genesis::DECIMAL_FACTOR as f64,
+            genesis_allocation_aura: genesis::MISSION_TREASURY_ALLOCATION as f64
+                / genesis::DECIMAL_FACTOR as f64,
             vesting_total_aura: 0.0,
             vesting_vested_aura: 0.0,
             vesting_months_remaining: 0,
@@ -823,7 +833,8 @@ async fn get_tokenomics(State(s): State<AppState>) -> ApiResult<TokenomicsResp> 
         },
         public_pool: AllocationInfo {
             address: genesis::PUBLIC_POOL_ADDRESS.to_string(),
-            genesis_allocation_aura: genesis::PUBLIC_POOL_ALLOCATION as f64 / genesis::DECIMAL_FACTOR as f64,
+            genesis_allocation_aura: genesis::PUBLIC_POOL_ALLOCATION as f64
+                / genesis::DECIMAL_FACTOR as f64,
             vesting_total_aura: 0.0,
             vesting_vested_aura: 0.0,
             vesting_months_remaining: 0,
@@ -831,7 +842,8 @@ async fn get_tokenomics(State(s): State<AppState>) -> ApiResult<TokenomicsResp> 
         },
         node_ops_pool: AllocationInfo {
             address: genesis::NODE_OPS_POOL_ADDRESS.to_string(),
-            genesis_allocation_aura: genesis::NODE_OPS_POOL_ALLOCATION as f64 / genesis::DECIMAL_FACTOR as f64,
+            genesis_allocation_aura: genesis::NODE_OPS_POOL_ALLOCATION as f64
+                / genesis::DECIMAL_FACTOR as f64,
             vesting_total_aura: 0.0,
             vesting_vested_aura: ops_pool_balance as f64 / genesis::DECIMAL_FACTOR as f64,
             vesting_months_remaining: 0,
@@ -887,7 +899,9 @@ fn validate_wallet_address(address: &str) -> Result<(), String> {
     // Validate hex characters after prefix
     for c in address[5..].chars() {
         if !c.is_ascii_hexdigit() {
-            return Err("Invalid address: must contain only hex characters after prefix".to_string());
+            return Err(
+                "Invalid address: must contain only hex characters after prefix".to_string(),
+            );
         }
     }
     Ok(())
@@ -910,16 +924,20 @@ async fn get_balance(
     let vesting = if address == genesis::FOUNDER_ADDRESS {
         let vested = genesis::founder_vested(now_ms);
         let months_elapsed = if now_ms > genesis::FOUNDER_VESTING_START_MS {
-            ((now_ms - genesis::FOUNDER_VESTING_START_MS) / genesis::VESTING_MONTH_MS).min(genesis::FOUNDER_VESTING_MONTHS)
+            ((now_ms - genesis::FOUNDER_VESTING_START_MS) / genesis::VESTING_MONTH_MS)
+                .min(genesis::FOUNDER_VESTING_MONTHS)
         } else {
             0
         };
         let months_remaining = genesis::FOUNDER_VESTING_MONTHS.saturating_sub(months_elapsed);
-        let vesting_end_ms = genesis::FOUNDER_VESTING_START_MS + genesis::FOUNDER_VESTING_MONTHS * genesis::VESTING_MONTH_MS;
+        let vesting_end_ms = genesis::FOUNDER_VESTING_START_MS
+            + genesis::FOUNDER_VESTING_MONTHS * genesis::VESTING_MONTH_MS;
         Some(VestingInfo {
-            genesis_allocation_aura: genesis::FOUNDER_GENESIS_ALLOCATION as f64 / genesis::DECIMAL_FACTOR as f64,
+            genesis_allocation_aura: genesis::FOUNDER_GENESIS_ALLOCATION as f64
+                / genesis::DECIMAL_FACTOR as f64,
             vested_aura: vested as f64 / genesis::DECIMAL_FACTOR as f64,
-            total_spendable_aura: genesis::founder_total_balance(now_ms) as f64 / genesis::DECIMAL_FACTOR as f64,
+            total_spendable_aura: genesis::founder_total_balance(now_ms) as f64
+                / genesis::DECIMAL_FACTOR as f64,
             vesting_months_remaining: months_remaining,
             vesting_end_ms,
         })
@@ -3943,7 +3961,11 @@ fn resolve_ability_profile(
     req: &LlmChatRequest,
 ) -> Result<&'static str, (StatusCode, String)> {
     let requested = normalize_requested_ability_profile(req.ability_profile.as_deref());
-    let header_clearance = normalize_clearance(access_context_from_headers(headers).clearance_hint.as_deref());
+    let header_clearance = normalize_clearance(
+        access_context_from_headers(headers)
+            .clearance_hint
+            .as_deref(),
+    );
     let sensitive_allowed = can_read_sensitive_scope(s, headers, req.memory_wallet.as_deref())
         .map_err(|(code, err)| (code, err.0.error))?;
 
@@ -4471,7 +4493,11 @@ async fn audit_verify_chain(State(s): State<AppState>) -> ApiResult<AuditVerifyR
         "WARNING: Chain integrity compromised - tampering detected".to_string()
     };
 
-    Ok(Json(AuditVerifyResponse { valid, total_entries: total, message }))
+    Ok(Json(AuditVerifyResponse {
+        valid,
+        total_entries: total,
+        message,
+    }))
 }
 
 async fn audit_forensics_export(State(s): State<AppState>) -> ApiResult<String> {
@@ -4490,27 +4516,36 @@ async fn admin_sign_message(
     State(state): State<AppState>,
     Json(payload): Json<SignPayload>,
 ) -> ApiResult<SignResponse> {
-    let signing_key = state
-        .admin_signing_key
-        .as_ref()
-        .ok_or_else(|| api_err(StatusCode::INTERNAL_SERVER_ERROR,
-            "Admin signing key not configured on this node"))?;
+    let signing_key = state.admin_signing_key.as_ref().ok_or_else(|| {
+        api_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Admin signing key not configured on this node",
+        )
+    })?;
 
-    let sk_bytes = hex::decode(signing_key)
-        .map_err(|_| api_err(StatusCode::BAD_REQUEST,
-            "Invalid hex in AROBL_ADMIN_SIGNING_KEY"))?;
+    let sk_bytes = hex::decode(signing_key).map_err(|_| {
+        api_err(
+            StatusCode::BAD_REQUEST,
+            "Invalid hex in AROBL_ADMIN_SIGNING_KEY",
+        )
+    })?;
 
     let secret = ed25519_dalek::SigningKey::from_bytes(
-        sk_bytes[..32].try_into().map_err(|_| {
-            api_err(StatusCode::BAD_REQUEST, "Signing key must be 32 bytes")
-        })?,
+        sk_bytes[..32]
+            .try_into()
+            .map_err(|_| api_err(StatusCode::BAD_REQUEST, "Signing key must be 32 bytes"))?,
     );
     let public = secret.verifying_key();
 
     // Build the canonical signing message: sha256(from||to||amount||fee||nonce||timestamp)
     let sign_msg = format!(
         "{}{}{}{}{}{}",
-        payload.tx_from, payload.tx_to, payload.amount, payload.fee, payload.nonce, payload.timestamp
+        payload.tx_from,
+        payload.tx_to,
+        payload.amount,
+        payload.fee,
+        payload.nonce,
+        payload.timestamp
     );
     let msg_hash = Sha256::digest(sign_msg.as_bytes());
     let signature = secret.sign(&msg_hash);
@@ -4519,7 +4554,12 @@ async fn admin_sign_message(
     // Compute tx_id: blake3 hash of the transaction fields (for embedding in ledger)
     let tx_id_str = format!(
         "{}{}{}{}{}{}",
-        payload.tx_from, payload.tx_to, payload.amount, payload.fee, payload.nonce, payload.timestamp
+        payload.tx_from,
+        payload.tx_to,
+        payload.amount,
+        payload.fee,
+        payload.nonce,
+        payload.timestamp
     );
     let tx_id = hex::encode(blake3::hash(tx_id_str.as_bytes()).as_bytes());
 
@@ -4533,13 +4573,13 @@ async fn admin_sign_message(
 
 #[derive(Deserialize)]
 struct SignPayload {
-    tx_from:     String,
-    tx_to:       String,
-    amount:      u64,
-    fee:         u64,
-    nonce:       u64,
-    timestamp:   u64,
-    data:        Option<String>,
+    tx_from: String,
+    tx_to: String,
+    amount: u64,
+    fee: u64,
+    nonce: u64,
+    timestamp: u64,
+    data: Option<String>,
 }
 
 #[derive(Serialize)]
