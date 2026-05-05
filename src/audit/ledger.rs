@@ -220,10 +220,22 @@ impl AuditEntry {
             ethics_details: self.ethics_details.clone(),
             subsystems_involved: self.subsystems.clone(),
             network: self.network_context.clone(),
-            requester: self.requester.clone().unwrap_or_else(|| "Anonymous".to_string()),
-            clearance: self.clearance_level.clone().unwrap_or_else(|| "None".to_string()),
-            action: self.action_taken.clone().unwrap_or_else(|| "None".to_string()),
-            outcome: self.outcome.clone().unwrap_or_else(|| "Pending".to_string()),
+            requester: self
+                .requester
+                .clone()
+                .unwrap_or_else(|| "Anonymous".to_string()),
+            clearance: self
+                .clearance_level
+                .clone()
+                .unwrap_or_else(|| "None".to_string()),
+            action: self
+                .action_taken
+                .clone()
+                .unwrap_or_else(|| "None".to_string()),
+            outcome: self
+                .outcome
+                .clone()
+                .unwrap_or_else(|| "Pending".to_string()),
             latency_ms: format!("{:.2}ms", self.latency_ms),
             integrity_verified: self.verify(),
             block_height: self.block_height,
@@ -350,17 +362,29 @@ impl AuditLedger {
     /// Get entries by source
     pub fn get_entries_by_source(&self, source: &DecisionSource) -> Vec<AuditEntry> {
         let entries = self.entries.read().unwrap();
-        entries.iter().filter(|e| &e.source == source).cloned().collect()
+        entries
+            .iter()
+            .filter(|e| &e.source == source)
+            .cloned()
+            .collect()
     }
 
     /// Get entries by decision type
     pub fn get_entries_by_type(&self, decision_type: &DecisionType) -> Vec<AuditEntry> {
         let entries = self.entries.read().unwrap();
-        entries.iter().filter(|e| &e.decision_type == decision_type).cloned().collect()
+        entries
+            .iter()
+            .filter(|e| &e.decision_type == decision_type)
+            .cloned()
+            .collect()
     }
 
     /// Get entries within time range
-    pub fn get_entries_in_range(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<AuditEntry> {
+    pub fn get_entries_in_range(
+        &self,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> Vec<AuditEntry> {
         let entries = self.entries.read().unwrap();
         entries
             .iter()
