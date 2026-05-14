@@ -1041,6 +1041,14 @@ fn normalize_audit_lane(value: &str) -> String {
     }
 }
 
+const TRAINING_SOURCE_COORDINATOR: &str = "training_coordinator";
+const TRAINING_EVENT_ROUND_COMPLETED: &str = "round_completed";
+const TRAINING_EVENT_GRADIENT_QUORUM_REACHED: &str = "gradient_quorum_reached";
+const TRAINING_STATUS_PENDING_REAL_AGGREGATION_METRIC: &str = "pending_real_aggregation_metric";
+const TRAINING_STATUS_PENDING_AGGREGATION: &str = "pending_aggregation";
+const TRAINING_LEGACY_RECLASSIFICATION_ID: &str =
+    "legacy-round-completed-pending-aggregation-v3.2.11";
+
 fn training_record_from_entry(
     entry: &AuditEntry,
     include_internal: bool,
@@ -1060,7 +1068,8 @@ fn training_record_from_entry(
         entry.network_context.clone()
     };
 
-    Some(TrainingExportRecord {
+    let legacy_pending_completion = is_legacy_pending_training_completion(&metadata);
+    let mut record = TrainingExportRecord {
         entry_id: entry.entry_id.clone(),
         timestamp: entry.timestamp,
         block_height: entry.block_height,
@@ -1086,7 +1095,86 @@ fn training_record_from_entry(
         integrity_verified: entry.verify(),
         entry_hash: entry.hash.clone(),
         metadata,
-    })
+    };
+
+    if legacy_pending_completion {
+        reclassify_legacy_pending_training_record(&mut record);
+    }
+
+    Some(record)
+}
+
+fn is_legacy_pending_training_completion(metadata: &HashMap<String, String>) -> bool {
+    metadata_value_eq(metadata, "source_system", TRAINING_SOURCE_COORDINATOR)
+        && metadata_value_eq(metadata, "event", TRAINING_EVENT_ROUND_COMPLETED)
+        && metadata_value_eq(
+            metadata,
+            "aggregation_metric_status",
+            TRAINING_STATUS_PENDING_REAL_AGGREGATION_METRIC,
+        )
+}
+
+fn metadata_value_eq(metadata: &HashMap<String, String>, key: &str, expected: &str) -> bool {
+    metadata
+        .get(key)
+        .map(|value| value.trim().eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
+}
+
+fn reclassify_legacy_pending_training_record(record: &mut TrainingExportRecord) {
+    let legacy_event = record
+        .metadata
+        .insert(
+            "event".to_string(),
+            TRAINING_EVENT_GRADIENT_QUORUM_REACHED.to_string(),
+        )
+        .unwrap_or_else(|| TRAINING_EVENT_ROUND_COMPLETED.to_string());
+    let legacy_status = record
+        .metadata
+        .insert(
+            "aggregation_metric_status".to_string(),
+            TRAINING_STATUS_PENDING_AGGREGATION.to_string(),
+        )
+        .unwrap_or_else(|| TRAINING_STATUS_PENDING_REAL_AGGREGATION_METRIC.to_string());
+
+    record
+        .metadata
+        .entry("legacy_event".to_string())
+        .or_insert(legacy_event);
+    record
+        .metadata
+        .entry("legacy_aggregation_metric_status".to_string())
+        .or_insert(legacy_status);
+    record.metadata.insert(
+        "q_training_migration".to_string(),
+        TRAINING_LEGACY_RECLASSIFICATION_ID.to_string(),
+    );
+
+    record.decision = TRAINING_EVENT_GRADIENT_QUORUM_REACHED.to_string();
+    record.input_summary = format!(
+        "Legacy training quorum reclassified for Q export: {}",
+        record.input_summary
+    );
+
+    let migration_note = "Legacy round_completed evidence with pending_real_aggregation_metric is not proof of aggregation completion.";
+    match record.reasoning.as_mut() {
+        Some(reasoning) if !reasoning.contains(migration_note) => {
+            reasoning.push(' ');
+            reasoning.push_str(migration_note);
+        }
+        Some(_) => {}
+        None => record.reasoning = Some(migration_note.to_string()),
+    }
+
+    if !record
+        .factors
+        .iter()
+        .any(|factor| factor == "legacy_round_completed_reclassified")
+    {
+        record
+            .factors
+            .push("legacy_round_completed_reclassified".to_string());
+    }
 }
 
 fn sanitize_training_metadata(
@@ -1654,6 +1742,96 @@ mod tests {
         );
         assert_eq!(private_record.metadata.get("route").unwrap(), "operator");
         assert!(!private_record.metadata.contains_key("secret_key"));
+    }
+
+    #[test]
+    fn legacy_pending_real_aggregation_metric_is_reclassified_for_q_export() {
+        let ledger = AuditLedger::new();
+        let legacy_entry = ledger.record_decision_with_metadata(
+            DecisionSource::External("training_coordinator".to_string()),
+            DecisionType::TrainingDecision,
+            "q-main",
+            "federated-training-v1",
+            "Training coordinator round_completed event for model q-main round 42",
+            br#"{"event":"round_completed","model_id":"q-main","round_id":42}"#,
+            "Federated training round completed after worker quorum",
+            0.92,
+            "Legacy v3.2.9 quorum evidence used the completion vocabulary before aggregation output existed.",
+            vec![
+                "participating_workers:3".to_string(),
+                "required_workers:3".to_string(),
+                "aggregation_pending".to_string(),
+            ],
+            true,
+            vec![
+                "arobi-network".to_string(),
+                "laas".to_string(),
+                "q-training".to_string(),
+            ],
+            "arobi-network-private-training",
+            0.0,
+            HashMap::from([
+                ("lane".to_string(), "private".to_string()),
+                (
+                    "source_system".to_string(),
+                    "training_coordinator".to_string(),
+                ),
+                ("event".to_string(), "round_completed".to_string()),
+                ("round_id".to_string(), "42".to_string()),
+                (
+                    "aggregation_metric_status".to_string(),
+                    "pending_real_aggregation_metric".to_string(),
+                ),
+            ]),
+        );
+
+        let export = ledger.export_training_corpus_with_manifest(true);
+        let record = export
+            .records
+            .iter()
+            .find(|record| record.entry_id == legacy_entry.entry_id)
+            .expect("legacy training record should still export for internal Q adapters");
+
+        assert_eq!(record.entry_hash, legacy_entry.hash);
+        assert_eq!(record.block_height, legacy_entry.block_height);
+        assert_eq!(
+            record.metadata.get("event").map(String::as_str),
+            Some("gradient_quorum_reached")
+        );
+        assert_eq!(
+            record
+                .metadata
+                .get("aggregation_metric_status")
+                .map(String::as_str),
+            Some("pending_aggregation")
+        );
+        assert_eq!(
+            record.metadata.get("legacy_event").map(String::as_str),
+            Some("round_completed")
+        );
+        assert_eq!(
+            record
+                .metadata
+                .get("legacy_aggregation_metric_status")
+                .map(String::as_str),
+            Some("pending_real_aggregation_metric")
+        );
+        assert_eq!(record.decision, "gradient_quorum_reached");
+        assert!(
+            record.input_summary.contains("Legacy training quorum"),
+            "input summary should make the legacy status clear to Q"
+        );
+        assert!(
+            record
+                .reasoning
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not proof of aggregation completion"),
+            "reasoning should prevent Q from learning false completion evidence"
+        );
+        assert!(record
+            .factors
+            .contains(&"legacy_round_completed_reclassified".to_string()));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # LaaS Audit Lane Contract
 
-Version: Arobi Network `3.2.10`
+Version: Arobi Network `3.2.11`
 
 Migration ID: `arobi-ledger-lane-v0.3-20260514`
 
@@ -100,10 +100,10 @@ re-chained under the current hash contract, and written back to the durable
 check, startup fails closed instead of silently accepting a corrupted audit
 history.
 
-The `3.2.5`, `3.2.6`, `3.2.7`, `3.2.8`, `3.2.9`, and `3.2.10` upgrades do not change
-stored audit entry shape or consensus identity. Existing durable entries are
-read as-is, and the training-corpus manifest plus vision-safe metadata contract
-are derived at export time from verified entries.
+The `3.2.5`, `3.2.6`, `3.2.7`, `3.2.8`, `3.2.9`, `3.2.10`, and `3.2.11`
+upgrades do not change stored audit entry shape or consensus identity. Existing
+durable entries are read as-is, and the training-corpus manifest plus
+vision-safe metadata contract are derived at export time from verified entries.
 
 If the durable append fails, the API rolls back the in-memory latest entry and
 returns a 5xx instead of reporting an audit receipt that only exists in RAM.
@@ -143,9 +143,20 @@ updates the checkpoint, clears pending gradients, and broadcasts
 `TrainingRoundComplete`. This keeps Q training receipts truthful: collected
 gradients are auditable, but placeholder completion evidence is not created.
 
+As of `3.2.11`, Q training exports reclassify verified legacy v3.2.9 records
+that have `source_system=training_coordinator`, `event=round_completed`, and
+`aggregation_metric_status=pending_real_aggregation_metric`. The exported
+record is labeled as `gradient_quorum_reached` with
+`aggregation_metric_status=pending_aggregation`, carries
+`legacy_event=round_completed`,
+`legacy_aggregation_metric_status=pending_real_aggregation_metric`, and keeps
+the original entry id, block height, and entry hash for audit traceability.
+This is an export-time data migration only; it does not rewrite the ledger.
+
 Verification:
 
 ```powershell
+cargo test --locked legacy_pending_real_aggregation_metric_is_reclassified_for_q_export
 cargo test --locked training_round_events_are_durably_audited_for_q_training
 cargo test --locked gradient_quorum_does_not_emit_completion_without_real_aggregation
 cargo test --locked completion_requires_real_aggregation_output

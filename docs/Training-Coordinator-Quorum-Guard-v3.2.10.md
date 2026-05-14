@@ -29,7 +29,10 @@ corpus because downstream systems could learn false completion evidence.
 No stored schema migration is required. Existing v3.2.9 private audit records
 remain readable. Operators should treat any historical `round_completed` record
 with `aggregation_metric_status=pending_real_aggregation_metric` as a legacy
-quorum record, not as proof of aggregation completion.
+quorum record, not as proof of aggregation completion. Arobi Network v3.2.11
+applies that rule inside Q training export so legacy records feed adapters as
+`gradient_quorum_reached` while preserving original entry hashes and block
+heights.
 
 New records use:
 
@@ -44,6 +47,7 @@ New records use:
 cargo test --locked gradient_quorum_does_not_emit_completion_without_real_aggregation
 cargo test --locked completion_requires_real_aggregation_output
 cargo test --locked training_round_events_are_durably_audited_for_q_training
+cargo test --locked legacy_pending_real_aggregation_metric_is_reclassified_for_q_export
 cargo fmt --all --check
 cargo check --locked
 cargo test --locked

@@ -779,7 +779,7 @@ async fn get_info(State(s): State<AppState>) -> ApiResult<NodeInfo> {
     let current_reward = genesis::current_block_reward(height, ops_pool_balance);
 
     Ok(Json(NodeInfo {
-        version: "3.2.10",
+        version: "3.2.11",
         network: genesis::NETWORK_MAGIC,
         protocol_version: genesis::NETWORK_VERSION,
         consensus_type: "proof_of_intelligence",
@@ -2145,7 +2145,7 @@ async fn autonomo_status(
 
     Ok(Json(AutonomoStatusResp {
         enabled: true,
-        version: "3.2.10",
+        version: "3.2.11",
         node_wallet: wallet,
         node_balance,
         node_public_key,
