@@ -428,6 +428,37 @@ pub struct TribunalFormat {
     pub metadata: HashMap<String, String>,
 }
 
+/// Training-safe audit record for Q data pipelines.
+///
+/// This intentionally excludes raw input hashes, signatures, requesters,
+/// clearances, actions, and outcomes. Public records carry redacted metadata;
+/// private records can include non-secret metadata only when explicitly
+/// requested. Sealed 00 records are never represented by this type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainingExportRecord {
+    pub entry_id: String,
+    pub timestamp: DateTime<Utc>,
+    pub block_height: u64,
+    pub lane: AuditLane,
+    pub decision_source: String,
+    pub decision_type: String,
+    pub model_id: String,
+    pub model_version: String,
+    pub input_summary: String,
+    pub decision: String,
+    pub confidence: f64,
+    pub confidence_level: ConfidenceLevel,
+    pub reasoning: Option<String>,
+    pub factors: Vec<String>,
+    pub ethics_validated: bool,
+    pub subsystems: Vec<String>,
+    pub network_context: String,
+    pub latency_ms: f64,
+    pub integrity_verified: bool,
+    pub entry_hash: String,
+    pub metadata: HashMap<String, String>,
+}
+
 /// Main audit ledger
 pub struct AuditLedger {
     pub entries: RwLock<Vec<AuditEntry>>,
@@ -651,6 +682,20 @@ impl AuditLedger {
         entries.iter().map(|e| e.to_tribunal_format()).collect()
     }
 
+    /// Export audit evidence into a Q-training-safe corpus.
+    ///
+    /// Public lane entries are always redacted. Private lane entries require
+    /// `include_internal = true`. Sealed 00 entries are blocked regardless of
+    /// caller options so public/private integration cannot bleed 00 evidence
+    /// into model training data.
+    pub fn export_training_corpus(&self, include_internal: bool) -> Vec<TrainingExportRecord> {
+        let entries = self.entries.read().unwrap();
+        entries
+            .iter()
+            .filter_map(|entry| training_record_from_entry(entry, include_internal))
+            .collect()
+    }
+
     /// Get total entries count
     pub fn len(&self) -> usize {
         self.entries.read().unwrap().len()
@@ -761,6 +806,101 @@ fn normalize_audit_lane(value: &str) -> String {
         "private" | "internal" | "operator" | "operator-audit" | "paid" => "private".to_string(),
         _ => "private".to_string(),
     }
+}
+
+fn training_record_from_entry(
+    entry: &AuditEntry,
+    include_internal: bool,
+) -> Option<TrainingExportRecord> {
+    match entry.lane.training_policy.as_str() {
+        "blocked" => return None,
+        "allowed-internal" if !include_internal => return None,
+        "allowed-redacted" | "allowed-internal" => {}
+        _ => return None,
+    }
+
+    let is_public_redacted = entry.lane.training_policy == "allowed-redacted";
+    let metadata = sanitize_training_metadata(&entry.metadata, is_public_redacted);
+    let network_context = if is_public_redacted {
+        entry.lane.lane_id.clone()
+    } else {
+        entry.network_context.clone()
+    };
+
+    Some(TrainingExportRecord {
+        entry_id: entry.entry_id.clone(),
+        timestamp: entry.timestamp,
+        block_height: entry.block_height,
+        lane: entry.lane.clone(),
+        decision_source: format!("{:?}", entry.source),
+        decision_type: format!("{:?}", entry.decision_type),
+        model_id: entry.model_id.clone(),
+        model_version: entry.model_version.clone(),
+        input_summary: entry.input_summary.clone(),
+        decision: entry.decision.clone(),
+        confidence: entry.confidence,
+        confidence_level: entry.confidence_level.clone(),
+        reasoning: if is_public_redacted {
+            None
+        } else {
+            Some(entry.reasoning.clone())
+        },
+        factors: entry.factors.clone(),
+        ethics_validated: entry.ethics_validated,
+        subsystems: entry.subsystems.clone(),
+        network_context,
+        latency_ms: entry.latency_ms,
+        integrity_verified: entry.verify(),
+        entry_hash: entry.hash.clone(),
+        metadata,
+    })
+}
+
+fn sanitize_training_metadata(
+    metadata: &HashMap<String, String>,
+    public_redacted: bool,
+) -> HashMap<String, String> {
+    metadata
+        .iter()
+        .filter(|(key, _)| !is_sensitive_training_metadata_key(key))
+        .filter(|(key, _)| !public_redacted || is_public_training_metadata_key(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+fn is_public_training_metadata_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "lane"
+            | "arobi_lane"
+            | "audit_lane"
+            | "source_system"
+            | "route"
+            | "release"
+            | "version"
+            | "policy"
+            | "category"
+            | "environment"
+    )
+}
+
+fn is_sensitive_training_metadata_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase();
+    [
+        "secret",
+        "token",
+        "key",
+        "password",
+        "credential",
+        "classified",
+        "clearance",
+        "requester",
+        "wallet",
+        "private",
+        "signature",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
 }
 
 /// Classify confidence level
@@ -1057,5 +1197,107 @@ mod tests {
         assert_eq!(zero_zero.lane.training_policy, "blocked");
         assert_eq!(ledger.get_entries_by_lane("public").len(), 1);
         assert_eq!(ledger.get_entries_by_lane("00").len(), 1);
+    }
+
+    #[test]
+    fn training_export_never_leaks_zero_zero_and_redacts_public_metadata() {
+        let ledger = AuditLedger::new();
+
+        let public = ledger.record_decision_with_metadata(
+            DecisionSource::Cortex,
+            DecisionType::TrainingDecision,
+            "q-ledger",
+            "1.0.0",
+            "Summarize public launch telemetry",
+            b"public launch telemetry with internal request context",
+            "include_public_signal",
+            0.86,
+            "Public telemetry is useful but requester data is not training-safe.",
+            vec!["public_signal".to_string()],
+            true,
+            vec!["laas".to_string()],
+            "public",
+            18.0,
+            HashMap::from([
+                ("lane".to_string(), "public".to_string()),
+                ("source_system".to_string(), "public-status".to_string()),
+                ("requester_wallet".to_string(), "AROBI-PRIVATE".to_string()),
+                ("api_token".to_string(), "secret-token".to_string()),
+            ]),
+        );
+
+        let private = ledger.record_decision_with_metadata(
+            DecisionSource::Ability,
+            DecisionType::ModelInference,
+            "q-ledger",
+            "1.0.0",
+            "Route private operator workflow",
+            b"private operator workflow",
+            "include_internal_signal",
+            0.91,
+            "Private operator evidence can train internal Q adapters.",
+            vec!["private_signal".to_string()],
+            true,
+            vec!["laas".to_string(), "q".to_string()],
+            "private",
+            24.0,
+            HashMap::from([
+                ("lane".to_string(), "private".to_string()),
+                ("route".to_string(), "operator".to_string()),
+                ("secret_key".to_string(), "never-export".to_string()),
+            ]),
+        );
+
+        let zero_zero = ledger.record_decision_with_metadata(
+            DecisionSource::Instinct,
+            DecisionType::ThreatAssessment,
+            "q-ledger",
+            "1.0.0",
+            "Classified 00 assessment",
+            b"classified 00 assessment",
+            "seal",
+            0.99,
+            "00 evidence stays sealed.",
+            vec!["sealed_signal".to_string()],
+            true,
+            vec!["laas".to_string()],
+            "00",
+            31.0,
+            HashMap::from([("lane".to_string(), "00".to_string())]),
+        );
+
+        let public_only = ledger.export_training_corpus(false);
+        assert_eq!(public_only.len(), 1);
+        assert_eq!(public_only[0].entry_id, public.entry_id);
+        assert_eq!(public_only[0].lane.training_policy, "allowed-redacted");
+        assert_eq!(public_only[0].network_context, "public");
+        assert!(!public_only[0].metadata.contains_key("requester_wallet"));
+        assert!(!public_only[0].metadata.contains_key("api_token"));
+        assert_eq!(
+            public_only[0].metadata.get("source_system").unwrap(),
+            "public-status"
+        );
+        assert!(public_only[0].reasoning.is_none());
+
+        let include_internal = ledger.export_training_corpus(true);
+        let exported_ids: Vec<_> = include_internal
+            .iter()
+            .map(|record| record.entry_id.as_str())
+            .collect();
+        assert!(exported_ids.contains(&public.entry_id.as_str()));
+        assert!(exported_ids.contains(&private.entry_id.as_str()));
+        assert!(!exported_ids.contains(&zero_zero.entry_id.as_str()));
+
+        let private_record = include_internal
+            .iter()
+            .find(|record| record.entry_id == private.entry_id)
+            .unwrap();
+        assert_eq!(private_record.lane.training_policy, "allowed-internal");
+        assert_eq!(
+            private_record.reasoning.as_deref(),
+            Some(private.reasoning.as_str())
+        );
+        assert_eq!(private_record.metadata.get("route").unwrap(), "operator");
+        assert!(!private_record.metadata.contains_key("secret_key"));
     }
 }

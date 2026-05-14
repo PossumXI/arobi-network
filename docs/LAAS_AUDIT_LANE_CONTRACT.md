@@ -1,6 +1,6 @@
 # LaaS Audit Lane Contract
 
-Version: Arobi Network `3.2.2`
+Version: Arobi Network `3.2.3`
 
 Migration ID: `arobi-ledger-lane-v0.3-20260514`
 
@@ -43,6 +43,17 @@ If `lane` is omitted, Arobi derives the lane from `metadata.lane`,
 `GET /api/v1/audit/lane/:lane_id` returns entries for a normalized lane. This is
 not a public API path; it remains behind the existing local-admin or API-token
 gate.
+
+`GET /api/v1/audit/training-corpus` returns a Q-training-safe corpus with
+public lane entries only. Public entries keep lane, model, decision, confidence,
+factor, subsystem, integrity, latency, and allowlisted metadata fields, but omit
+requester/clearance/action/outcome/signature/raw input fields and reasoning.
+
+`GET /api/v1/audit/training-corpus?include_internal=true` also includes private
+operator-audit entries for internal Q adapters. It still strips secret-like
+metadata keys. `zero-zero` entries are blocked from this export in all modes.
+This route is not a public API path; it remains behind local-admin or API-token
+access.
 
 `POST /api/v1/admin/sign` is also behind the local-admin or API-token gate. It
 must not be exposed as a public route because it signs canonical ledger payloads.

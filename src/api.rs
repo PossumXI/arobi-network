@@ -19,7 +19,9 @@ use tracing::info;
 
 use crate::agents::inference_router::InferenceRouterAgent;
 use crate::agents::tool_executor::ToolExecutorAgent;
-use crate::audit::ledger::{AuditLedger, DecisionSource, DecisionType, TribunalFormat};
+use crate::audit::ledger::{
+    AuditLedger, DecisionSource, DecisionType, TrainingExportRecord, TribunalFormat,
+};
 use crate::block::{Block, Transaction};
 use crate::compute::reputation::ReputationOracle;
 use crate::compute::scheduler::Scheduler;
@@ -776,7 +778,7 @@ async fn get_info(State(s): State<AppState>) -> ApiResult<NodeInfo> {
     let current_reward = genesis::current_block_reward(height, ops_pool_balance);
 
     Ok(Json(NodeInfo {
-        version: "3.2.2",
+        version: "3.2.3",
         network: genesis::NETWORK_MAGIC,
         protocol_version: genesis::NETWORK_VERSION,
         consensus_type: "proof_of_intelligence",
@@ -2142,7 +2144,7 @@ async fn autonomo_status(
 
     Ok(Json(AutonomoStatusResp {
         enabled: true,
-        version: "3.2.2",
+        version: "3.2.3",
         node_wallet: wallet,
         node_balance,
         node_public_key,
@@ -4396,6 +4398,19 @@ struct AuditVerifyResponse {
     message: String,
 }
 
+#[derive(Deserialize)]
+struct AuditTrainingCorpusQuery {
+    #[serde(default)]
+    include_internal: bool,
+}
+
+#[derive(Serialize)]
+struct AuditTrainingCorpusResponse {
+    records: Vec<TrainingExportRecord>,
+    total: usize,
+    include_internal: bool,
+}
+
 async fn audit_record_decision(
     State(s): State<AppState>,
     Json(req): Json<AuditRecordRequest>,
@@ -4544,6 +4559,19 @@ async fn audit_verify_chain(State(s): State<AppState>) -> ApiResult<AuditVerifyR
 async fn audit_forensics_export(State(s): State<AppState>) -> ApiResult<String> {
     let export = s.audit_ledger.export_forensics();
     Ok(Json(export))
+}
+
+async fn audit_training_corpus_export(
+    State(s): State<AppState>,
+    Query(q): Query<AuditTrainingCorpusQuery>,
+) -> ApiResult<AuditTrainingCorpusResponse> {
+    let records = s.audit_ledger.export_training_corpus(q.include_internal);
+    let total = records.len();
+    Ok(Json(AuditTrainingCorpusResponse {
+        records,
+        total,
+        include_internal: q.include_internal,
+    }))
 }
 
 // ─── Router & server ───────────────────────────────────────────────────────────
@@ -4814,6 +4842,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/audit/tribunal", get(audit_tribunal_export))
         .route("/api/v1/audit/verify", get(audit_verify_chain))
         .route("/api/v1/audit/forensics", get(audit_forensics_export))
+        .route(
+            "/api/v1/audit/training-corpus",
+            get(audit_training_corpus_export),
+        )
         // Prometheus metrics
         .route("/metrics", get(prometheus_metrics))
         // External surface: keep public read-only routes available, but gate
@@ -4882,6 +4914,11 @@ mod tests {
     #[test]
     fn admin_signing_route_requires_local_or_token_access() {
         assert!(!is_public_api_route(&Method::POST, "/api/v1/admin/sign"));
+        assert!(!is_public_api_route(
+            &Method::GET,
+            "/api/v1/audit/training-corpus"
+        ));
+        assert!(!is_public_api_route(&Method::GET, "/api/v1/audit/lane/00"));
         assert!(is_public_api_route(&Method::POST, "/api/v1/tx/submit"));
         assert!(is_public_api_route(
             &Method::POST,
