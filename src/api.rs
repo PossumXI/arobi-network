@@ -404,10 +404,26 @@ fn has_forwarded_client_ip(headers: &axum::http::HeaderMap) -> bool {
         || headers.contains_key("x-real-ip")
 }
 
+fn is_local_host_header(headers: &axum::http::HeaderMap) -> bool {
+    let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
+        return true;
+    };
+
+    let normalized = host.trim().to_ascii_lowercase();
+    normalized == "localhost"
+        || normalized.starts_with("localhost:")
+        || normalized == "127.0.0.1"
+        || normalized.starts_with("127.0.0.1:")
+        || normalized == "[::1]"
+        || normalized.starts_with("[::1]:")
+        || normalized == "::1"
+}
+
 fn is_direct_local_request(remote: &SocketAddr, headers: &axum::http::HeaderMap) -> bool {
     // API binds to localhost. Tunnel/proxy traffic is also local at socket level,
-    // so treat forwarded-client headers as non-local requests.
-    remote.ip().is_loopback() && !has_forwarded_client_ip(headers)
+    // so require both a loopback socket and a loopback Host header. Public
+    // tunnels usually connect from loopback while preserving the public host.
+    remote.ip().is_loopback() && !has_forwarded_client_ip(headers) && is_local_host_header(headers)
 }
 
 fn is_public_api_path(path: &str) -> bool {
@@ -5019,6 +5035,11 @@ pub async fn serve(state: AppState, port: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::HeaderValue;
+
+    fn loopback_remote() -> SocketAddr {
+        "127.0.0.1:8080".parse().expect("valid loopback addr")
+    }
 
     #[test]
     fn training_corpus_response_includes_manifest_for_q_pipeline_audits() {
@@ -5104,5 +5125,33 @@ mod tests {
             &Method::POST,
             "/api/v1/autonomo/relay/send"
         ));
+    }
+
+    #[test]
+    fn direct_local_request_requires_loopback_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:8080"));
+
+        assert!(is_direct_local_request(&loopback_remote(), &headers));
+    }
+
+    #[test]
+    fn public_tunnel_host_is_not_direct_local_even_from_loopback() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_static("arobi.aura-genesis.org"),
+        );
+
+        assert!(!is_direct_local_request(&loopback_remote(), &headers));
+    }
+
+    #[test]
+    fn forwarded_public_client_headers_are_not_direct_local() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:8080"));
+        headers.insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.10"));
+
+        assert!(!is_direct_local_request(&loopback_remote(), &headers));
     }
 }
