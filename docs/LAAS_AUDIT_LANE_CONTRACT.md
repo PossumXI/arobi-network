@@ -1,6 +1,6 @@
 # LaaS Audit Lane Contract
 
-Version: Arobi Network `3.2.6`
+Version: Arobi Network `3.2.7`
 
 Migration ID: `arobi-ledger-lane-v0.3-20260514`
 
@@ -52,6 +52,9 @@ The public metadata allowlist includes non-identifying vision/safety telemetry
 such as `modality`, `vision_task`, `object_classes`, `object_count`,
 `person_count`, `safety_signal`, `safety_signal_confidence`,
 `body_language_signal`, and `vision_privacy_policy`.
+Those keys are still value-sanitized: secret-like values are removed from all
+training exports, and public exports additionally remove values that carry
+identity, biometric, license-plate, tracking, or accusatory person-risk labels.
 The response includes a `manifest` block with source count, exported count,
 public/private export counts, skipped private count, blocked `zero-zero` count,
 integrity-failed block count, public reasoning redaction count, and removed
@@ -91,7 +94,7 @@ re-chained under the current hash contract, and written back to the durable
 check, startup fails closed instead of silently accepting a corrupted audit
 history.
 
-The `3.2.5` and `3.2.6` upgrades do not change stored audit entry shape or
+The `3.2.5`, `3.2.6`, and `3.2.7` upgrades do not change stored audit entry shape or
 consensus identity. Existing durable entries are read as-is, and the
 training-corpus manifest plus vision-safe metadata contract are derived at
 export time from verified entries.
@@ -104,9 +107,15 @@ previous-hash selection, latest-hash advancement, and entry insertion. This
 prevents concurrent LaaS audit writes from producing duplicate previous hashes
 or out-of-order in-memory chains under load.
 
+As of `3.2.7`, training export validates both metadata keys and metadata
+values. This keeps safe aggregate vision telemetry useful for Q training while
+blocking adapter mistakes such as secret tokens inside `source_system`,
+`face_embedding` references inside `vision_task`, license-plate text inside
+`vision_privacy_policy`, names inside `body_language_signal`, or accusatory
+labels such as `bad_actor`.
+
 ## Operator Rule
 
 Do not change `NETWORK_MAGIC`, `NETWORK_VERSION`, or genesis block text for this
 migration. Those are consensus and history surfaces. This release changes the
 audit evidence contract, not the chain identity.
-

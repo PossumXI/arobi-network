@@ -34,7 +34,7 @@ use peer::normalize_peer_endpoint;
 #[command(
     name = "arobi-network",
     about = "Arobi Network — Proof of Intelligence Blockchain Node",
-    version = "3.2.6",
+    version = "3.2.7",
     long_about = None
 )]
 struct Cli {

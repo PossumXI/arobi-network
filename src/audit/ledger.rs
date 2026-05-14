@@ -1097,6 +1097,7 @@ fn sanitize_training_metadata(
         .iter()
         .filter(|(key, _)| !is_sensitive_training_metadata_key(key))
         .filter(|(key, _)| !public_redacted || is_public_training_metadata_key(key))
+        .filter(|(key, value)| is_training_metadata_value_safe(key, value, public_redacted))
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
 }
@@ -1124,6 +1125,105 @@ fn is_public_training_metadata_key(key: &str) -> bool {
             | "body_language_signal"
             | "vision_privacy_policy"
     )
+}
+
+fn is_training_metadata_value_safe(key: &str, value: &str, public_redacted: bool) -> bool {
+    let normalized_key = key.to_ascii_lowercase();
+    let mut normalized_value = value.trim().to_ascii_lowercase();
+
+    // This exact policy label is intentionally allowed in public vision exports.
+    // Remove it before scanning for identity markers so policy text does not
+    // block itself.
+    for allowed_identity_policy in [
+        "no_persistent_identity",
+        "no-persistent-identity",
+        "no persistent identity",
+        "non_persistent_identity",
+        "non-persistent-identity",
+        "non persistent identity",
+    ] {
+        normalized_value = normalized_value.replace(allowed_identity_policy, "");
+    }
+
+    let unsafe_secret_markers = [
+        "secret",
+        "token=",
+        "api_token",
+        "api-key",
+        "api_key",
+        "password",
+        "credential",
+        "classified",
+        "clearance",
+        "requester",
+        "wallet",
+        "private key",
+        "signature",
+    ];
+    if unsafe_secret_markers
+        .iter()
+        .any(|marker| normalized_value.contains(marker))
+    {
+        return false;
+    }
+
+    if !public_redacted {
+        return true;
+    }
+
+    let unsafe_public_identity_markers = [
+        "face_embedding",
+        "face embedding",
+        "facial_recognition",
+        "facial recognition",
+        "biometric",
+        "embedding vector",
+        "license_plate",
+        "license plate",
+        "plate_number",
+        "plate number",
+        "persistent_subject",
+        "subject_id",
+        "subject id",
+        "subject_name",
+        "subject name",
+        "person_id",
+        "person id",
+        "person_name",
+        "person name",
+        "tracking_id",
+        "tracking id",
+        "identity_embedding",
+        "identified as",
+    ];
+    if unsafe_public_identity_markers
+        .iter()
+        .any(|marker| normalized_value.contains(marker))
+    {
+        return false;
+    }
+
+    let unsafe_accusatory_markers = [
+        "bad_actor",
+        "bad actor",
+        "criminal",
+        "suspect",
+        "suspicious",
+        "hostile",
+        "target",
+        "perpetrator",
+    ];
+    if matches!(
+        normalized_key.as_str(),
+        "safety_signal" | "body_language_signal" | "vision_task"
+    ) && unsafe_accusatory_markers
+        .iter()
+        .any(|marker| normalized_value.contains(marker))
+    {
+        return false;
+    }
+
+    true
 }
 
 fn is_sensitive_training_metadata_key(key: &str) -> bool {
@@ -1836,5 +1936,101 @@ mod tests {
         assert!(!metadata.contains_key("license_plate"));
         assert!(!metadata.contains_key("persistent_subject_id"));
         assert_eq!(export.manifest.metadata_keys_removed, 4);
+    }
+
+    #[test]
+    fn public_training_export_removes_identity_and_accusatory_vision_values() {
+        let ledger = AuditLedger::new();
+        ledger.record_decision_with_metadata(
+            DecisionSource::Ability,
+            DecisionType::ModelInference,
+            "q-vision",
+            "3.2.7",
+            "Public safety vision event with unsafe adapter metadata values",
+            b"redacted-frame-digest",
+            "route-to-human-review",
+            0.81,
+            "The event should preserve aggregate safety context without identity or accusation labels.",
+            vec![
+                "vision_policy".to_string(),
+                "human_review_required".to_string(),
+            ],
+            true,
+            vec!["q-vision".to_string(), "laas".to_string()],
+            "public",
+            39.0,
+            HashMap::from([
+                ("modality".to_string(), "vision".to_string()),
+                (
+                    "vision_task".to_string(),
+                    "object_detection with face_embedding".to_string(),
+                ),
+                ("object_count".to_string(), "3".to_string()),
+                ("person_count".to_string(), "1".to_string()),
+                ("safety_signal".to_string(), "bad_actor".to_string()),
+                (
+                    "body_language_signal".to_string(),
+                    "John Doe looks suspicious".to_string(),
+                ),
+                (
+                    "vision_privacy_policy".to_string(),
+                    "no_persistent_identity license_plate ABC123".to_string(),
+                ),
+            ]),
+        );
+
+        let export = ledger.export_training_corpus_with_manifest(false);
+        assert_eq!(export.records.len(), 1);
+
+        let metadata = &export.records[0].metadata;
+        assert_eq!(metadata.get("modality").map(String::as_str), Some("vision"));
+        assert_eq!(metadata.get("object_count").map(String::as_str), Some("3"));
+        assert_eq!(metadata.get("person_count").map(String::as_str), Some("1"));
+        assert!(!metadata.contains_key("vision_task"));
+        assert!(!metadata.contains_key("safety_signal"));
+        assert!(!metadata.contains_key("body_language_signal"));
+        assert!(!metadata.contains_key("vision_privacy_policy"));
+        assert_eq!(export.manifest.metadata_keys_removed, 4);
+    }
+
+    #[test]
+    fn internal_training_export_removes_secret_values_from_allowed_keys() {
+        let ledger = AuditLedger::new();
+        ledger.record_decision_with_metadata(
+            DecisionSource::Ability,
+            DecisionType::TrainingDecision,
+            "q-training",
+            "3.2.7",
+            "Private training audit event with unsafe value text",
+            b"private-training-digest",
+            "allow-internal-training",
+            0.88,
+            "Internal exports still cannot carry secret-looking values into Q training.",
+            vec!["operator_audit".to_string()],
+            true,
+            vec!["laas".to_string(), "q-training".to_string()],
+            "private",
+            31.0,
+            HashMap::from([
+                ("route".to_string(), "operator".to_string()),
+                (
+                    "source_system".to_string(),
+                    "benchmark api_token=should_not_export".to_string(),
+                ),
+                (
+                    "category".to_string(),
+                    "service credential bootstrap".to_string(),
+                ),
+            ]),
+        );
+
+        let export = ledger.export_training_corpus_with_manifest(true);
+        assert_eq!(export.records.len(), 1);
+
+        let metadata = &export.records[0].metadata;
+        assert_eq!(metadata.get("route").map(String::as_str), Some("operator"));
+        assert!(!metadata.contains_key("source_system"));
+        assert!(!metadata.contains_key("category"));
+        assert_eq!(export.manifest.metadata_keys_removed, 2);
     }
 }

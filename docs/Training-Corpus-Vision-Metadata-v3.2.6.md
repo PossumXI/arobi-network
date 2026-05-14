@@ -41,6 +41,10 @@ The same release also serializes audit ledger appends behind one append lock.
 That keeps block height, previous hash, tip hash, and entry order coherent when
 multiple LaaS/Q workers record decisions at the same time.
 
+Follow-up release `3.2.7` extends this boundary from metadata keys to metadata
+values so adapter mistakes inside allowlisted keys are removed before public Q
+training export.
+
 ## Safety Contract
 
 - This release does not add facial recognition, identity matching, tracking,

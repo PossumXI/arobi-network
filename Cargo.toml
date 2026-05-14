@@ -1,6 +1,6 @@
 [package]
 name = "arobi-network"
-version = "3.2.6"
+version = "3.2.7"
 edition = "2021"
 description = "Arobi Network — Decentralized Collective Intelligence Blockchain Node with Proof of Intelligence"
 authors = ["Arobi Technology Alliance"]
