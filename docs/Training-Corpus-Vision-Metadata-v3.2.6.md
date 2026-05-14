@@ -37,6 +37,10 @@ key contains markers such as `face`, `biometric`, `license_plate`,
 `plate_number`, `subject_id`, `subject_name`, `person_name`, `tracking_id`, or
 `persistent_subject`.
 
+The same release also serializes audit ledger appends behind one append lock.
+That keeps block height, previous hash, tip hash, and entry order coherent when
+multiple LaaS/Q workers record decisions at the same time.
+
 ## Safety Contract
 
 - This release does not add facial recognition, identity matching, tracking,
@@ -53,7 +57,9 @@ key contains markers such as `face`, `biometric`, `license_plate`,
 ## Migration
 
 No stored audit entry migration is required. Existing records remain valid.
-The new behavior applies at export time through the metadata sanitizer.
+The new metadata behavior applies at export time through the metadata
+sanitizer. The append-lock change affects only in-process write ordering for
+new records.
 
 Adapters that ingest Q vision evidence should record the allowlisted aggregate
 fields above and place identity-bearing or biometric data outside the training
@@ -75,3 +81,4 @@ cargo clippy --locked -- -D warnings
 Targeted test:
 
 - `public_training_export_keeps_safe_vision_metadata_and_blocks_identity_fields`
+- `concurrent_record_decision_preserves_hash_chain`
