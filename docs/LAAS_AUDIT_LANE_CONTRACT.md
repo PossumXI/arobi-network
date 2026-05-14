@@ -1,6 +1,6 @@
 # LaaS Audit Lane Contract
 
-Version: Arobi Network `3.2.7`
+Version: Arobi Network `3.2.8`
 
 Migration ID: `arobi-ledger-lane-v0.3-20260514`
 
@@ -63,6 +63,12 @@ manifest also includes `migration_id` and deterministic `lane_summaries` for
 `public`, `private`, and `zero-zero`, allowing downstream jobs to verify lane
 policy without inspecting any sealed record content.
 
+`GET /api/v1/audit/training-corpus/manifest` returns the same manifest wrapped
+in a Q training receipt with `records_sha256`, `records_total`, and
+`boundary_contract` while returning no training record payload. Operators and Q
+release gates should use this route for continuous boundary checks, then pull
+the full corpus only when the receipt changes.
+
 `GET /api/v1/audit/training-corpus?include_internal=true` also includes private
 operator-audit entries for internal Q adapters. It still strips secret-like
 metadata keys. `zero-zero` entries are blocked from this export in all modes.
@@ -94,7 +100,7 @@ re-chained under the current hash contract, and written back to the durable
 check, startup fails closed instead of silently accepting a corrupted audit
 history.
 
-The `3.2.5`, `3.2.6`, and `3.2.7` upgrades do not change stored audit entry shape or
+The `3.2.5`, `3.2.6`, `3.2.7`, and `3.2.8` upgrades do not change stored audit entry shape or
 consensus identity. Existing durable entries are read as-is, and the
 training-corpus manifest plus vision-safe metadata contract are derived at
 export time from verified entries.
@@ -113,6 +119,10 @@ blocking adapter mistakes such as secret tokens inside `source_system`,
 `face_embedding` references inside `vision_task`, license-plate text inside
 `vision_privacy_policy`, names inside `body_language_signal`, or accusatory
 labels such as `bad_actor`.
+
+As of `3.2.8`, training export emits a manifest-only receipt route so operators
+can verify the sanitized corpus hash and lane counters without transferring
+record payloads during routine audit checks.
 
 ## Operator Rule
 

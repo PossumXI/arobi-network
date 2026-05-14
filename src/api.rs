@@ -20,8 +20,8 @@ use tracing::info;
 use crate::agents::inference_router::InferenceRouterAgent;
 use crate::agents::tool_executor::ToolExecutorAgent;
 use crate::audit::ledger::{
-    AuditLedger, DecisionSource, DecisionType, TrainingExportManifest, TrainingExportRecord,
-    TribunalFormat,
+    AuditLedger, DecisionSource, DecisionType, TrainingCorpusExport, TrainingExportManifest,
+    TrainingExportRecord, TribunalFormat,
 };
 use crate::block::{Block, Transaction};
 use crate::compute::reputation::ReputationOracle;
@@ -779,7 +779,7 @@ async fn get_info(State(s): State<AppState>) -> ApiResult<NodeInfo> {
     let current_reward = genesis::current_block_reward(height, ops_pool_balance);
 
     Ok(Json(NodeInfo {
-        version: "3.2.7",
+        version: "3.2.8",
         network: genesis::NETWORK_MAGIC,
         protocol_version: genesis::NETWORK_VERSION,
         consensus_type: "proof_of_intelligence",
@@ -2145,7 +2145,7 @@ async fn autonomo_status(
 
     Ok(Json(AutonomoStatusResp {
         enabled: true,
-        version: "3.2.7",
+        version: "3.2.8",
         node_wallet: wallet,
         node_balance,
         node_public_key,
@@ -4411,6 +4411,94 @@ struct AuditTrainingCorpusResponse {
     total: usize,
     include_internal: bool,
     manifest: TrainingExportManifest,
+    receipt: AuditTrainingCorpusReceipt,
+}
+
+#[derive(Clone, Serialize)]
+struct AuditTrainingCorpusReceipt {
+    schema_version: u32,
+    receipt_id: String,
+    generated_at: String,
+    include_internal: bool,
+    records_total: usize,
+    records_sha256: String,
+    boundary_contract: &'static str,
+    manifest: TrainingExportManifest,
+}
+
+const TRAINING_CORPUS_RECEIPT_SCHEMA_VERSION: u32 = 1;
+
+fn training_corpus_receipt_from_export(
+    export: &TrainingCorpusExport,
+) -> AuditTrainingCorpusReceipt {
+    let records_sha256 = training_corpus_records_sha256(&export.records);
+    let schema_version = TRAINING_CORPUS_RECEIPT_SCHEMA_VERSION;
+    let hash_prefix: String = records_sha256.chars().take(16).collect();
+    AuditTrainingCorpusReceipt {
+        schema_version,
+        receipt_id: format!("qtrain-manifest-v{schema_version}-{hash_prefix}"),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        include_internal: export.manifest.include_internal,
+        records_total: export.records.len(),
+        records_sha256,
+        boundary_contract: "manifest-only-no-record-payload",
+        manifest: export.manifest.clone(),
+    }
+}
+
+fn training_corpus_records_sha256(records: &[TrainingExportRecord]) -> String {
+    let canonical = canonical_json_bytes(records);
+    hex::encode(Sha256::digest(canonical))
+}
+
+fn canonical_json_bytes<T: Serialize + ?Sized>(value: &T) -> Vec<u8> {
+    let value = serde_json::to_value(value).expect("training corpus records should serialize");
+    let mut out = Vec::new();
+    write_canonical_json(&value, &mut out);
+    out
+}
+
+fn write_canonical_json(value: &serde_json::Value, out: &mut Vec<u8>) {
+    match value {
+        serde_json::Value::Null => out.extend_from_slice(b"null"),
+        serde_json::Value::Bool(value) => {
+            out.extend_from_slice(if *value { b"true" } else { b"false" });
+        }
+        serde_json::Value::Number(value) => out.extend_from_slice(value.to_string().as_bytes()),
+        serde_json::Value::String(value) => out.extend_from_slice(
+            serde_json::to_string(value)
+                .expect("JSON string should serialize")
+                .as_bytes(),
+        ),
+        serde_json::Value::Array(items) => {
+            out.push(b'[');
+            for (idx, item) in items.iter().enumerate() {
+                if idx > 0 {
+                    out.push(b',');
+                }
+                write_canonical_json(item, out);
+            }
+            out.push(b']');
+        }
+        serde_json::Value::Object(map) => {
+            out.push(b'{');
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by_key(|(key, _)| *key);
+            for (idx, (key, item)) in entries.iter().enumerate() {
+                if idx > 0 {
+                    out.push(b',');
+                }
+                out.extend_from_slice(
+                    serde_json::to_string(key)
+                        .expect("JSON object key should serialize")
+                        .as_bytes(),
+                );
+                out.push(b':');
+                write_canonical_json(item, out);
+            }
+            out.push(b'}');
+        }
+    }
 }
 
 async fn audit_record_decision(
@@ -4571,12 +4659,24 @@ async fn audit_training_corpus_export(
         .audit_ledger
         .export_training_corpus_with_manifest(q.include_internal);
     let total = export.records.len();
+    let receipt = training_corpus_receipt_from_export(&export);
     Ok(Json(AuditTrainingCorpusResponse {
         records: export.records,
         total,
         include_internal: q.include_internal,
         manifest: export.manifest,
+        receipt,
     }))
+}
+
+async fn audit_training_corpus_manifest(
+    State(s): State<AppState>,
+    Query(q): Query<AuditTrainingCorpusQuery>,
+) -> ApiResult<AuditTrainingCorpusReceipt> {
+    let export = s
+        .audit_ledger
+        .export_training_corpus_with_manifest(q.include_internal);
+    Ok(Json(training_corpus_receipt_from_export(&export)))
 }
 
 // ─── Router & server ───────────────────────────────────────────────────────────
@@ -4848,6 +4948,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/audit/verify", get(audit_verify_chain))
         .route("/api/v1/audit/forensics", get(audit_forensics_export))
         .route(
+            "/api/v1/audit/training-corpus/manifest",
+            get(audit_training_corpus_manifest),
+        )
+        .route(
             "/api/v1/audit/training-corpus",
             get(audit_training_corpus_export),
         )
@@ -4945,12 +5049,18 @@ mod tests {
                 metadata_keys_removed: 0,
             }],
         };
+        let export = crate::audit::ledger::TrainingCorpusExport {
+            manifest: manifest.clone(),
+            records: Vec::new(),
+        };
+        let receipt = training_corpus_receipt_from_export(&export);
 
         let response = AuditTrainingCorpusResponse {
             records: Vec::new(),
             total: manifest.exported_total,
             include_internal: manifest.include_internal,
             manifest,
+            receipt,
         };
 
         let json = serde_json::to_value(response).expect("response should serialize");
@@ -4962,6 +5072,23 @@ mod tests {
         assert_eq!(json["manifest"]["zero_zero_blocked"], 1);
         assert_eq!(json["manifest"]["metadata_keys_removed"], 2);
         assert_eq!(json["manifest"]["lane_summaries"][0]["lane_id"], "public");
+        assert_eq!(json["receipt"]["records_total"], 0);
+        assert_eq!(
+            json["receipt"]["records_sha256"],
+            hex::encode(Sha256::digest(b"[]"))
+        );
+        assert!(json["receipt"]["receipt_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("qtrain-manifest-v1-"));
+    }
+
+    #[test]
+    fn training_corpus_manifest_route_is_admin_only() {
+        assert!(!is_public_api_route(
+            &Method::GET,
+            "/api/v1/audit/training-corpus/manifest"
+        ));
     }
 
     #[test]
