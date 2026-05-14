@@ -530,6 +530,47 @@ pub struct TrainingExportRecord {
     pub metadata: HashMap<String, String>,
 }
 
+/// Per-lane accounting for a training-safe export.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrainingExportLaneSummary {
+    pub lane_id: String,
+    pub export_scope: String,
+    pub training_policy: String,
+    pub retention_class: String,
+    pub source_total: usize,
+    pub exported_total: usize,
+    pub skipped_total: usize,
+    pub blocked_total: usize,
+    pub integrity_failed_blocked: usize,
+    pub public_reasoning_redacted: usize,
+    pub metadata_keys_removed: usize,
+}
+
+/// Aggregate export evidence for Q-training corpus generation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrainingExportManifest {
+    pub schema_version: u32,
+    pub migration_id: String,
+    pub include_internal: bool,
+    pub source_total: usize,
+    pub exported_total: usize,
+    pub public_exported: usize,
+    pub private_exported: usize,
+    pub private_skipped: usize,
+    pub zero_zero_blocked: usize,
+    pub integrity_failed_blocked: usize,
+    pub public_reasoning_redacted: usize,
+    pub metadata_keys_removed: usize,
+    pub lane_summaries: Vec<TrainingExportLaneSummary>,
+}
+
+/// Training-safe export bundle for Q data pipelines.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrainingCorpusExport {
+    pub manifest: TrainingExportManifest,
+    pub records: Vec<TrainingExportRecord>,
+}
+
 /// Main audit ledger
 pub struct AuditLedger {
     pub entries: RwLock<Vec<AuditEntry>>,
@@ -760,11 +801,96 @@ impl AuditLedger {
     /// caller options so public/private integration cannot bleed 00 evidence
     /// into model training data.
     pub fn export_training_corpus(&self, include_internal: bool) -> Vec<TrainingExportRecord> {
+        self.export_training_corpus_with_manifest(include_internal)
+            .records
+    }
+
+    pub fn export_training_corpus_with_manifest(
+        &self,
+        include_internal: bool,
+    ) -> TrainingCorpusExport {
         let entries = self.entries.read().unwrap();
-        entries
-            .iter()
-            .filter_map(|entry| training_record_from_entry(entry, include_internal))
-            .collect()
+        let mut records = Vec::new();
+        let mut public_lane = TrainingExportLaneCounters::default();
+        let mut private_lane = TrainingExportLaneCounters::default();
+        let mut zero_zero_lane = TrainingExportLaneCounters::default();
+        let mut manifest = TrainingExportManifest {
+            schema_version: 2,
+            migration_id: AUDIT_LANE_MIGRATION_ID.to_string(),
+            include_internal,
+            source_total: entries.len(),
+            exported_total: 0,
+            public_exported: 0,
+            private_exported: 0,
+            private_skipped: 0,
+            zero_zero_blocked: 0,
+            integrity_failed_blocked: 0,
+            public_reasoning_redacted: 0,
+            metadata_keys_removed: 0,
+            lane_summaries: Vec::new(),
+        };
+
+        for entry in entries.iter() {
+            let lane_counters = match entry.lane.lane_id.as_str() {
+                "public" => &mut public_lane,
+                "zero-zero" => &mut zero_zero_lane,
+                _ => &mut private_lane,
+            };
+            lane_counters.source_total += 1;
+
+            if !entry.verify() {
+                manifest.integrity_failed_blocked += 1;
+                lane_counters.integrity_failed_blocked += 1;
+                lane_counters.blocked_total += 1;
+                continue;
+            }
+
+            match entry.lane.training_policy.as_str() {
+                "blocked" => {
+                    manifest.zero_zero_blocked += 1;
+                    lane_counters.blocked_total += 1;
+                    continue;
+                }
+                "allowed-internal" if !include_internal => {
+                    manifest.private_skipped += 1;
+                    lane_counters.skipped_total += 1;
+                    continue;
+                }
+                "allowed-redacted" | "allowed-internal" => {}
+                _ => {
+                    lane_counters.blocked_total += 1;
+                    continue;
+                }
+            }
+
+            let is_public_redacted = entry.lane.training_policy == "allowed-redacted";
+            if is_public_redacted && !entry.reasoning.is_empty() {
+                manifest.public_reasoning_redacted += 1;
+                lane_counters.public_reasoning_redacted += 1;
+            }
+
+            if let Some(record) = training_record_from_entry(entry, include_internal) {
+                let metadata_keys_removed =
+                    entry.metadata.len().saturating_sub(record.metadata.len());
+                manifest.metadata_keys_removed += metadata_keys_removed;
+                lane_counters.metadata_keys_removed += metadata_keys_removed;
+                match record.lane.lane_id.as_str() {
+                    "public" => manifest.public_exported += 1,
+                    "private" => manifest.private_exported += 1,
+                    _ => {}
+                }
+                lane_counters.exported_total += 1;
+                records.push(record);
+            }
+        }
+
+        manifest.exported_total = records.len();
+        manifest.lane_summaries = vec![
+            training_lane_summary("public", &public_lane),
+            training_lane_summary("private", &private_lane),
+            training_lane_summary("zero-zero", &zero_zero_lane),
+        ];
+        TrainingCorpusExport { manifest, records }
     }
 
     /// Get total entries count
@@ -794,6 +920,37 @@ impl AuditLedger {
     pub fn export_forensics(&self) -> String {
         let entries = self.entries.read().unwrap();
         serde_json::to_string_pretty(&*entries).unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Default)]
+struct TrainingExportLaneCounters {
+    source_total: usize,
+    exported_total: usize,
+    skipped_total: usize,
+    blocked_total: usize,
+    integrity_failed_blocked: usize,
+    public_reasoning_redacted: usize,
+    metadata_keys_removed: usize,
+}
+
+fn training_lane_summary(
+    lane_id: &str,
+    counters: &TrainingExportLaneCounters,
+) -> TrainingExportLaneSummary {
+    let lane = AuditLane::from_context(lane_id, &HashMap::new());
+    TrainingExportLaneSummary {
+        lane_id: lane.lane_id,
+        export_scope: lane.export_scope,
+        training_policy: lane.training_policy,
+        retention_class: lane.retention_class,
+        source_total: counters.source_total,
+        exported_total: counters.exported_total,
+        skipped_total: counters.skipped_total,
+        blocked_total: counters.blocked_total,
+        integrity_failed_blocked: counters.integrity_failed_blocked,
+        public_reasoning_redacted: counters.public_reasoning_redacted,
+        metadata_keys_removed: counters.metadata_keys_removed,
     }
 }
 
@@ -1370,5 +1527,154 @@ mod tests {
         );
         assert_eq!(private_record.metadata.get("route").unwrap(), "operator");
         assert!(!private_record.metadata.contains_key("secret_key"));
+    }
+
+    #[test]
+    fn training_export_manifest_accounts_for_redaction_and_tamper_blocks() {
+        let ledger = AuditLedger::new();
+        let public = ledger.record_decision_with_metadata(
+            DecisionSource::Ability,
+            DecisionType::TrainingDecision,
+            "q-ledger",
+            "1.0.0",
+            "Public export candidate",
+            b"public export candidate",
+            "allow-redacted-training",
+            0.91,
+            "Public reasoning must not be sent to default training exports.",
+            vec!["public_policy".to_string()],
+            true,
+            vec!["laas".to_string()],
+            "public",
+            15.0,
+            HashMap::from([
+                ("source_system".to_string(), "qline".to_string()),
+                ("api_token".to_string(), "redacted".to_string()),
+            ]),
+        );
+
+        let private = ledger.record_decision_with_metadata(
+            DecisionSource::Cortex,
+            DecisionType::NetworkRouting,
+            "q-ledger",
+            "1.0.0",
+            "Private export candidate",
+            b"private export candidate",
+            "allow-internal-training",
+            0.88,
+            "Private reasoning can be exported only when internal export is explicit.",
+            vec!["operator_policy".to_string()],
+            true,
+            vec!["laas".to_string()],
+            "private",
+            24.0,
+            HashMap::from([
+                ("route".to_string(), "operator".to_string()),
+                ("secret_key".to_string(), "redacted".to_string()),
+            ]),
+        );
+
+        ledger.record_decision_with_metadata(
+            DecisionSource::Instinct,
+            DecisionType::ThreatAssessment,
+            "q-ledger",
+            "1.0.0",
+            "Sealed export candidate",
+            b"sealed export candidate",
+            "block-training",
+            0.97,
+            "Sealed evidence must never enter the training corpus.",
+            vec!["sealed_policy".to_string()],
+            true,
+            vec!["laas".to_string(), "zero-zero".to_string()],
+            "mission-control-00",
+            31.0,
+            HashMap::new(),
+        );
+
+        let tampered = ledger.record_decision_with_metadata(
+            DecisionSource::Ability,
+            DecisionType::TrainingDecision,
+            "q-ledger",
+            "1.0.0",
+            "Tampered public export candidate",
+            b"tampered public export candidate",
+            "allow-redacted-training",
+            0.9,
+            "This entry will be tampered after recording.",
+            vec!["tamper_policy".to_string()],
+            true,
+            vec!["laas".to_string()],
+            "public",
+            18.0,
+            HashMap::new(),
+        );
+
+        {
+            let mut entries = ledger.entries.write().unwrap();
+            let entry = entries
+                .iter_mut()
+                .find(|entry| entry.entry_id == tampered.entry_id)
+                .unwrap();
+            entry.decision = "tampered-after-recording".to_string();
+        }
+
+        let export = ledger.export_training_corpus_with_manifest(true);
+        assert_eq!(export.manifest.schema_version, 2);
+        assert_eq!(export.manifest.migration_id, AUDIT_LANE_MIGRATION_ID);
+        assert!(export.manifest.include_internal);
+        assert_eq!(export.manifest.source_total, 4);
+        assert_eq!(export.manifest.exported_total, 2);
+        assert_eq!(export.manifest.public_exported, 1);
+        assert_eq!(export.manifest.private_exported, 1);
+        assert_eq!(export.manifest.zero_zero_blocked, 1);
+        assert_eq!(export.manifest.integrity_failed_blocked, 1);
+        assert_eq!(export.manifest.public_reasoning_redacted, 1);
+        assert_eq!(export.manifest.metadata_keys_removed, 2);
+
+        let public_summary = export
+            .manifest
+            .lane_summaries
+            .iter()
+            .find(|summary| summary.lane_id == "public")
+            .unwrap();
+        assert_eq!(public_summary.export_scope, "public-redacted");
+        assert_eq!(public_summary.training_policy, "allowed-redacted");
+        assert_eq!(public_summary.retention_class, "public-evidence");
+        assert_eq!(public_summary.source_total, 2);
+        assert_eq!(public_summary.exported_total, 1);
+        assert_eq!(public_summary.blocked_total, 1);
+        assert_eq!(public_summary.integrity_failed_blocked, 1);
+
+        let private_summary = export
+            .manifest
+            .lane_summaries
+            .iter()
+            .find(|summary| summary.lane_id == "private")
+            .unwrap();
+        assert_eq!(private_summary.source_total, 1);
+        assert_eq!(private_summary.exported_total, 1);
+        assert_eq!(private_summary.skipped_total, 0);
+
+        let zero_zero_summary = export
+            .manifest
+            .lane_summaries
+            .iter()
+            .find(|summary| summary.lane_id == "zero-zero")
+            .unwrap();
+        assert_eq!(zero_zero_summary.export_scope, "sealed");
+        assert_eq!(zero_zero_summary.training_policy, "blocked");
+        assert_eq!(zero_zero_summary.source_total, 1);
+        assert_eq!(zero_zero_summary.exported_total, 0);
+        assert_eq!(zero_zero_summary.blocked_total, 1);
+
+        let exported_ids: Vec<_> = export
+            .records
+            .iter()
+            .map(|record| record.entry_id.as_str())
+            .collect();
+        assert!(exported_ids.contains(&public.entry_id.as_str()));
+        assert!(exported_ids.contains(&private.entry_id.as_str()));
+        assert!(!exported_ids.contains(&tampered.entry_id.as_str()));
     }
 }

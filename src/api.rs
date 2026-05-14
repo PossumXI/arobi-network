@@ -20,7 +20,8 @@ use tracing::info;
 use crate::agents::inference_router::InferenceRouterAgent;
 use crate::agents::tool_executor::ToolExecutorAgent;
 use crate::audit::ledger::{
-    AuditLedger, DecisionSource, DecisionType, TrainingExportRecord, TribunalFormat,
+    AuditLedger, DecisionSource, DecisionType, TrainingExportManifest, TrainingExportRecord,
+    TribunalFormat,
 };
 use crate::block::{Block, Transaction};
 use crate::compute::reputation::ReputationOracle;
@@ -778,7 +779,7 @@ async fn get_info(State(s): State<AppState>) -> ApiResult<NodeInfo> {
     let current_reward = genesis::current_block_reward(height, ops_pool_balance);
 
     Ok(Json(NodeInfo {
-        version: "3.2.4",
+        version: "3.2.5",
         network: genesis::NETWORK_MAGIC,
         protocol_version: genesis::NETWORK_VERSION,
         consensus_type: "proof_of_intelligence",
@@ -2144,7 +2145,7 @@ async fn autonomo_status(
 
     Ok(Json(AutonomoStatusResp {
         enabled: true,
-        version: "3.2.4",
+        version: "3.2.5",
         node_wallet: wallet,
         node_balance,
         node_public_key,
@@ -4409,6 +4410,7 @@ struct AuditTrainingCorpusResponse {
     records: Vec<TrainingExportRecord>,
     total: usize,
     include_internal: bool,
+    manifest: TrainingExportManifest,
 }
 
 async fn audit_record_decision(
@@ -4565,12 +4567,15 @@ async fn audit_training_corpus_export(
     State(s): State<AppState>,
     Query(q): Query<AuditTrainingCorpusQuery>,
 ) -> ApiResult<AuditTrainingCorpusResponse> {
-    let records = s.audit_ledger.export_training_corpus(q.include_internal);
-    let total = records.len();
+    let export = s
+        .audit_ledger
+        .export_training_corpus_with_manifest(q.include_internal);
+    let total = export.records.len();
     Ok(Json(AuditTrainingCorpusResponse {
-        records,
+        records: export.records,
         total,
         include_internal: q.include_internal,
+        manifest: export.manifest,
     }))
 }
 
@@ -4910,6 +4915,54 @@ pub async fn serve(state: AppState, port: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn training_corpus_response_includes_manifest_for_q_pipeline_audits() {
+        let manifest = crate::audit::ledger::TrainingExportManifest {
+            schema_version: 2,
+            migration_id: crate::audit::ledger::AUDIT_LANE_MIGRATION_ID.to_string(),
+            include_internal: false,
+            source_total: 3,
+            exported_total: 1,
+            public_exported: 1,
+            private_exported: 0,
+            private_skipped: 1,
+            zero_zero_blocked: 1,
+            integrity_failed_blocked: 0,
+            public_reasoning_redacted: 1,
+            metadata_keys_removed: 2,
+            lane_summaries: vec![crate::audit::ledger::TrainingExportLaneSummary {
+                lane_id: "public".to_string(),
+                export_scope: "public-redacted".to_string(),
+                training_policy: "allowed-redacted".to_string(),
+                retention_class: "public-evidence".to_string(),
+                source_total: 1,
+                exported_total: 1,
+                skipped_total: 0,
+                blocked_total: 0,
+                integrity_failed_blocked: 0,
+                public_reasoning_redacted: 0,
+                metadata_keys_removed: 0,
+            }],
+        };
+
+        let response = AuditTrainingCorpusResponse {
+            records: Vec::new(),
+            total: manifest.exported_total,
+            include_internal: manifest.include_internal,
+            manifest,
+        };
+
+        let json = serde_json::to_value(response).expect("response should serialize");
+        assert_eq!(json["manifest"]["source_total"], 3);
+        assert_eq!(
+            json["manifest"]["migration_id"],
+            crate::audit::ledger::AUDIT_LANE_MIGRATION_ID
+        );
+        assert_eq!(json["manifest"]["zero_zero_blocked"], 1);
+        assert_eq!(json["manifest"]["metadata_keys_removed"], 2);
+        assert_eq!(json["manifest"]["lane_summaries"][0]["lane_id"], "public");
+    }
 
     #[test]
     fn admin_signing_route_requires_local_or_token_access() {
