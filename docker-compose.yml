@@ -1,7 +1,7 @@
 services:
   arobi-node:
     build: .
-    image: arobi-network:3.2.1
+    image: arobi-network:3.2.10
     container_name: arobi-node
     restart: always
     ports:

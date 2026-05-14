@@ -4,7 +4,6 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use std::process::Command;
 
 /// An Arobi Network wallet backed by an Ed25519 key pair.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +68,7 @@ fn harden_wallet_file_permissions(path: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         let path_arg = path.display().to_string();
-        let status = Command::new("icacls")
+        let status = std::process::Command::new("icacls")
             .args([
                 &path_arg,
                 "/inheritance:r",
