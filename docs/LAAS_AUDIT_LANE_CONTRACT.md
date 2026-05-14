@@ -1,6 +1,6 @@
 # LaaS Audit Lane Contract
 
-Version: Arobi Network `3.2.8`
+Version: Arobi Network `3.2.9`
 
 Migration ID: `arobi-ledger-lane-v0.3-20260514`
 
@@ -100,10 +100,10 @@ re-chained under the current hash contract, and written back to the durable
 check, startup fails closed instead of silently accepting a corrupted audit
 history.
 
-The `3.2.5`, `3.2.6`, `3.2.7`, and `3.2.8` upgrades do not change stored audit entry shape or
-consensus identity. Existing durable entries are read as-is, and the
-training-corpus manifest plus vision-safe metadata contract are derived at
-export time from verified entries.
+The `3.2.5`, `3.2.6`, `3.2.7`, `3.2.8`, and `3.2.9` upgrades do not change
+stored audit entry shape or consensus identity. Existing durable entries are
+read as-is, and the training-corpus manifest plus vision-safe metadata contract
+are derived at export time from verified entries.
 
 If the durable append fails, the API rolls back the in-memory latest entry and
 returns a 5xx instead of reporting an audit receipt that only exists in RAM.
@@ -123,6 +123,22 @@ labels such as `bad_actor`.
 As of `3.2.8`, training export emits a manifest-only receipt route so operators
 can verify the sanitized corpus hash and lane counters without transferring
 record payloads during routine audit checks.
+
+As of `3.2.9`, the federated training coordinator writes private-lane audit
+evidence for training round start, gradient receipt, and round completion events.
+The audit sink records metadata needed for accountability and Q internal
+training corpus receipts, including model id, round id, checkpoint id, worker
+count, and gradient hash. It does not store raw gradient payload bytes. Public
+training exports skip these private records unless `include_internal=true`, and
+`zero-zero` export blocking remains unchanged.
+
+Verification:
+
+```powershell
+cargo test --locked training_round_events_are_durably_audited_for_q_training
+cargo test --locked
+cargo clippy --locked -- -D warnings
+```
 
 ## Operator Rule
 

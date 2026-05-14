@@ -210,6 +210,17 @@ impl Node {
             store.set_mission_treasury_address(&treasury.address)?;
         }
 
+        // ── Audit Ledger for AI decisions ────────────────────────────────────────
+        let audit_entries = store.load_audit_entries()?;
+        let audit_ledger =
+            Arc::new(AuditLedger::try_from_entries(audit_entries).map_err(|err| {
+                anyhow::anyhow!("AI Decision Audit Ledger refused startup: {err}")
+            })?);
+        info!(
+            "AI Decision Audit Ledger initialized with {} durable entries",
+            audit_ledger.len()
+        );
+
         let peer_ctx = Arc::new(PeerContext {
             store: store.clone(),
             mempool: mempool.clone(),
@@ -223,10 +234,12 @@ impl Node {
         });
 
         // ── Federated Training Coordinator ──────────────────────────────────
-        let training_coordinator = Arc::new(TrainingCoordinatorAgent::new(
+        let training_coordinator = Arc::new(TrainingCoordinatorAgent::with_audit_sink(
             chunk_store.clone(),
             p2p.clone(),
             node_address.clone(),
+            audit_ledger.clone(),
+            store.clone(),
         ));
         agent_manager.initialize_training_coordinator(training_coordinator.clone());
         info!("   Training : federated coordinator initialized");
@@ -486,17 +499,6 @@ impl Node {
         } else {
             info!("Mining disabled — running as relay node");
         }
-
-        // ── Audit Ledger for AI decisions ────────────────────────────────────────
-        let audit_entries = store.load_audit_entries()?;
-        let audit_ledger =
-            Arc::new(AuditLedger::try_from_entries(audit_entries).map_err(|err| {
-                anyhow::anyhow!("AI Decision Audit Ledger refused startup: {err}")
-            })?);
-        info!(
-            "AI Decision Audit Ledger initialized with {} durable entries",
-            audit_ledger.len()
-        );
 
         // ── HTTP API (runs in foreground, blocks until shutdown) ───────────────
         let api_state = AppState {

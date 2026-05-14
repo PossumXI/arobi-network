@@ -4,13 +4,16 @@
 //! save/load via ArobiFS, and gradient aggregation across network peers.
 
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tracing::info;
+use tracing::{info, warn};
 
+use crate::audit::ledger::{AuditLedger, DecisionSource, DecisionType};
 use crate::fs::local_store::ChunkStore;
 use crate::p2p::P2p;
+use crate::store::Store;
 
 /// Events emitted by the TrainingCoordinator.
 #[derive(Debug, Clone)]
@@ -37,6 +40,22 @@ struct ModelTrainingState {
     min_workers: usize,
 }
 
+#[derive(Clone)]
+struct TrainingAuditSink {
+    ledger: Arc<AuditLedger>,
+    store: Arc<Store>,
+}
+
+struct TrainingAuditEvent<'a> {
+    event: &'a str,
+    model_id: &'a str,
+    round_id: u64,
+    decision: &'a str,
+    confidence: f64,
+    factors: Vec<String>,
+    metadata: HashMap<String, String>,
+}
+
 /// TrainingCoordinator agent — manages federated training lifecycle.
 pub struct TrainingCoordinatorAgent {
     #[allow(dead_code)]
@@ -49,6 +68,7 @@ pub struct TrainingCoordinatorAgent {
     /// Per-model training state
     models: RwLock<std::collections::HashMap<String, ModelTrainingState>>,
     event_tx: broadcast::Sender<TrainingEvent>,
+    audit_sink: Option<TrainingAuditSink>,
 }
 
 impl TrainingCoordinatorAgent {
@@ -61,7 +81,23 @@ impl TrainingCoordinatorAgent {
             running: AtomicBool::new(false),
             models: RwLock::new(std::collections::HashMap::new()),
             event_tx,
+            audit_sink: None,
         }
+    }
+
+    pub fn with_audit_sink(
+        chunk_store: Arc<ChunkStore>,
+        p2p: Arc<P2p>,
+        node_address: String,
+        audit_ledger: Arc<AuditLedger>,
+        store: Arc<Store>,
+    ) -> Self {
+        let mut agent = Self::new(chunk_store, p2p, node_address);
+        agent.audit_sink = Some(TrainingAuditSink {
+            ledger: audit_ledger,
+            store,
+        });
+        agent
     }
 
     /// Start the training coordinator.
@@ -98,6 +134,25 @@ impl TrainingCoordinatorAgent {
         let _ = self
             .event_tx
             .send(TrainingEvent::RoundStarted(model_id.to_string(), round_id));
+
+        self.record_training_audit_event(TrainingAuditEvent {
+            event: "round_started",
+            model_id,
+            round_id,
+            decision: "Federated training round started",
+            confidence: 1.0,
+            factors: vec![
+                format!("checkpoint:{checkpoint_file_id}"),
+                format!("min_workers:{min_workers}"),
+            ],
+            metadata: HashMap::from([
+                (
+                    "checkpoint_file_id".to_string(),
+                    checkpoint_file_id.to_string(),
+                ),
+                ("min_workers".to_string(), min_workers.to_string()),
+            ]),
+        });
 
         // Broadcast TrainingRoundStart to peers
         self.p2p
@@ -146,6 +201,32 @@ impl TrainingCoordinatorAgent {
                 worker.to_string(),
             ));
 
+            self.record_training_audit_event(TrainingAuditEvent {
+                event: "gradient_received",
+                model_id,
+                round_id,
+                decision: "Federated training gradient received",
+                confidence: 0.95,
+                factors: vec![
+                    format!("worker:{worker}"),
+                    format!("num_samples:{num_samples}"),
+                    format!("gradient_hash:{gradient_hash}"),
+                ],
+                metadata: HashMap::from([
+                    ("worker".to_string(), worker.to_string()),
+                    ("num_samples".to_string(), num_samples.to_string()),
+                    ("gradient_hash".to_string(), gradient_hash.to_string()),
+                    (
+                        "pending_workers".to_string(),
+                        state.pending_gradients.len().to_string(),
+                    ),
+                    (
+                        "required_workers".to_string(),
+                        state.min_workers.to_string(),
+                    ),
+                ]),
+            });
+
             info!(
                 "Gradient received from {} for model {model_id} round {round_id} ({}/{} workers)",
                 &worker[..12.min(worker.len())],
@@ -171,6 +252,32 @@ impl TrainingCoordinatorAgent {
                     round_id,
                     0.0, // loss computed during actual aggregation
                 ));
+
+                self.record_training_audit_event(TrainingAuditEvent {
+                    event: "round_completed",
+                    model_id,
+                    round_id,
+                    decision: "Federated training round completed",
+                    confidence: 0.98,
+                    factors: vec![
+                        format!("participating_workers:{}", workers.len()),
+                        format!("checkpoint:{}", state.checkpoint_file_id),
+                    ],
+                    metadata: HashMap::from([
+                        (
+                            "participating_workers_count".to_string(),
+                            workers.len().to_string(),
+                        ),
+                        (
+                            "checkpoint_file_id".to_string(),
+                            state.checkpoint_file_id.clone(),
+                        ),
+                        (
+                            "aggregation_metric_status".to_string(),
+                            "pending_real_aggregation_metric".to_string(),
+                        ),
+                    ]),
+                });
 
                 // Broadcast TrainingRoundComplete
                 self.p2p
@@ -209,5 +316,144 @@ impl TrainingCoordinatorAgent {
     #[allow(dead_code)]
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::Relaxed)
+    }
+
+    fn record_training_audit_event(&self, mut audit_event: TrainingAuditEvent<'_>) {
+        let Some(sink) = &self.audit_sink else {
+            return;
+        };
+
+        audit_event
+            .metadata
+            .insert("lane".to_string(), "private".to_string());
+        audit_event.metadata.insert(
+            "source_system".to_string(),
+            "training_coordinator".to_string(),
+        );
+        audit_event
+            .metadata
+            .insert("event".to_string(), audit_event.event.to_string());
+        audit_event
+            .metadata
+            .insert("round_id".to_string(), audit_event.round_id.to_string());
+        audit_event
+            .metadata
+            .insert("node_address".to_string(), self.node_address.clone());
+
+        let input_summary = format!(
+            "Training coordinator {} event for model {} round {}",
+            audit_event.event, audit_event.model_id, audit_event.round_id
+        );
+        let input_data = serde_json::json!({
+            "event": audit_event.event,
+            "model_id": audit_event.model_id,
+            "round_id": audit_event.round_id,
+            "node_address": &self.node_address,
+        })
+        .to_string();
+
+        let entry = sink.ledger.record_decision_with_metadata(
+            DecisionSource::External("training_coordinator".to_string()),
+            DecisionType::TrainingDecision,
+            audit_event.model_id,
+            "federated-training-v1",
+            &input_summary,
+            input_data.as_bytes(),
+            audit_event.decision,
+            audit_event.confidence,
+            "Training lifecycle event recorded for durable LaaS audit and Q corpus evidence.",
+            audit_event.factors,
+            true,
+            vec![
+                "arobi-network".to_string(),
+                "laas".to_string(),
+                "q-training".to_string(),
+            ],
+            "arobi-network-private-training",
+            0.0,
+            audit_event.metadata,
+        );
+
+        if let Err(err) = sink.store.append_audit_entry(&entry) {
+            let rolled_back = sink.ledger.rollback_latest(&entry.entry_id);
+            warn!(
+                "Failed to durably append training audit entry {} (rolled_back={}): {err}",
+                entry.entry_id, rolled_back
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::ledger::AuditLedger;
+    use crate::block::Block;
+    use crate::fs::local_store::ChunkStore;
+    use crate::p2p::P2p;
+    use crate::store::Store;
+    use std::fs;
+    use tokio::sync::broadcast;
+
+    fn temp_store_dir(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "arobi-training-audit-{name}-{}",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    #[test]
+    fn training_round_events_are_durably_audited_for_q_training() {
+        let dir = temp_store_dir("round-lifecycle");
+        let store = Arc::new(Store::open(&dir).expect("store should open"));
+        let chunk_store =
+            Arc::new(ChunkStore::open(&dir, store.db().clone()).expect("chunk store should open"));
+        let (block_tx, _) = broadcast::channel::<Block>(16);
+        let p2p = P2p::new(block_tx);
+        let audit_ledger = Arc::new(AuditLedger::new());
+        let coordinator = TrainingCoordinatorAgent::with_audit_sink(
+            chunk_store,
+            p2p,
+            "NODE_PUBLIC".to_string(),
+            audit_ledger.clone(),
+            store.clone(),
+        );
+
+        let round_id = coordinator.start_round("q-main", "checkpoint-001", 1);
+        coordinator.receive_gradient(
+            "q-main",
+            round_id,
+            "worker-001",
+            "Z3JhZGllbnQ=",
+            128,
+            "gradient-hash-001",
+        );
+
+        let entries = store
+            .load_audit_entries()
+            .expect("audit entries should reload from durable store");
+        assert_eq!(entries.len(), 3);
+        assert!(entries.iter().all(|entry| entry.lane.lane_id == "private"));
+
+        let public_export = audit_ledger.export_training_corpus_with_manifest(false);
+        assert_eq!(public_export.records.len(), 0);
+        assert_eq!(public_export.manifest.private_skipped, 3);
+
+        let internal_export = audit_ledger.export_training_corpus_with_manifest(true);
+        assert_eq!(internal_export.records.len(), 3);
+        assert!(internal_export.records.iter().all(|record| record
+            .metadata
+            .get("source_system")
+            .map(String::as_str)
+            == Some("training_coordinator")));
+        assert!(internal_export.records.iter().any(|record| record
+            .metadata
+            .get("event")
+            .map(String::as_str)
+            == Some("round_completed")));
+
+        drop(coordinator);
+        drop(store);
+        let _ = fs::remove_dir_all(dir);
     }
 }
