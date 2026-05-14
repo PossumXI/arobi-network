@@ -1109,6 +1109,15 @@ fn is_public_training_metadata_key(key: &str) -> bool {
             | "policy"
             | "category"
             | "environment"
+            | "modality"
+            | "vision_task"
+            | "object_classes"
+            | "object_count"
+            | "person_count"
+            | "safety_signal"
+            | "safety_signal_confidence"
+            | "body_language_signal"
+            | "vision_privacy_policy"
     )
 }
 
@@ -1126,6 +1135,19 @@ fn is_sensitive_training_metadata_key(key: &str) -> bool {
         "wallet",
         "private",
         "signature",
+        "face",
+        "facial",
+        "biometric",
+        "embedding",
+        "license_plate",
+        "plate_number",
+        "persistent_subject",
+        "subject_id",
+        "subject_name",
+        "person_id",
+        "person_name",
+        "tracking_id",
+        "identity",
     ]
     .iter()
     .any(|marker| normalized.contains(marker))
@@ -1676,5 +1698,84 @@ mod tests {
         assert!(exported_ids.contains(&public.entry_id.as_str()));
         assert!(exported_ids.contains(&private.entry_id.as_str()));
         assert!(!exported_ids.contains(&tampered.entry_id.as_str()));
+    }
+
+    #[test]
+    fn public_training_export_keeps_safe_vision_metadata_and_blocks_identity_fields() {
+        let ledger = AuditLedger::new();
+        let public = ledger.record_decision_with_metadata(
+            DecisionSource::Ability,
+            DecisionType::ModelInference,
+            "q-vision",
+            "3.2.6",
+            "Public safety vision event with non-identifying telemetry",
+            b"redacted-frame-digest",
+            "route-to-human-review",
+            0.86,
+            "The event should be represented as aggregate safety telemetry, not identity data.",
+            vec![
+                "vision_policy".to_string(),
+                "human_review_required".to_string(),
+            ],
+            true,
+            vec!["q-vision".to_string(), "laas".to_string()],
+            "public",
+            42.0,
+            HashMap::from([
+                ("source_system".to_string(), "q-vision".to_string()),
+                ("modality".to_string(), "vision".to_string()),
+                ("vision_task".to_string(), "object_detection".to_string()),
+                (
+                    "object_classes".to_string(),
+                    "person,vehicle,backpack".to_string(),
+                ),
+                ("object_count".to_string(), "3".to_string()),
+                ("person_count".to_string(), "1".to_string()),
+                ("safety_signal".to_string(), "possible_fall".to_string()),
+                ("safety_signal_confidence".to_string(), "0.82".to_string()),
+                (
+                    "body_language_signal".to_string(),
+                    "distress_posture".to_string(),
+                ),
+                (
+                    "vision_privacy_policy".to_string(),
+                    "no_persistent_identity".to_string(),
+                ),
+                ("face_embedding".to_string(), "blocked".to_string()),
+                ("biometric_template".to_string(), "blocked".to_string()),
+                ("license_plate".to_string(), "blocked".to_string()),
+                ("persistent_subject_id".to_string(), "blocked".to_string()),
+            ]),
+        );
+
+        let export = ledger.export_training_corpus_with_manifest(false);
+        assert_eq!(export.records.len(), 1);
+        assert_eq!(export.records[0].entry_id, public.entry_id);
+
+        let metadata = &export.records[0].metadata;
+        assert_eq!(metadata.get("modality").map(String::as_str), Some("vision"));
+        assert_eq!(
+            metadata.get("vision_task").map(String::as_str),
+            Some("object_detection")
+        );
+        assert_eq!(metadata.get("object_count").map(String::as_str), Some("3"));
+        assert_eq!(metadata.get("person_count").map(String::as_str), Some("1"));
+        assert_eq!(
+            metadata.get("safety_signal").map(String::as_str),
+            Some("possible_fall")
+        );
+        assert_eq!(
+            metadata.get("body_language_signal").map(String::as_str),
+            Some("distress_posture")
+        );
+        assert_eq!(
+            metadata.get("vision_privacy_policy").map(String::as_str),
+            Some("no_persistent_identity")
+        );
+        assert!(!metadata.contains_key("face_embedding"));
+        assert!(!metadata.contains_key("biometric_template"));
+        assert!(!metadata.contains_key("license_plate"));
+        assert!(!metadata.contains_key("persistent_subject_id"));
+        assert_eq!(export.manifest.metadata_keys_removed, 4);
     }
 }

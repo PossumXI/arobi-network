@@ -1,6 +1,6 @@
 # LaaS Audit Lane Contract
 
-Version: Arobi Network `3.2.5`
+Version: Arobi Network `3.2.6`
 
 Migration ID: `arobi-ledger-lane-v0.3-20260514`
 
@@ -48,6 +48,10 @@ gate.
 public lane entries only. Public entries keep lane, model, decision, confidence,
 factor, subsystem, integrity, latency, and allowlisted metadata fields, but omit
 requester/clearance/action/outcome/signature/raw input fields and reasoning.
+The public metadata allowlist includes non-identifying vision/safety telemetry
+such as `modality`, `vision_task`, `object_classes`, `object_count`,
+`person_count`, `safety_signal`, `safety_signal_confidence`,
+`body_language_signal`, and `vision_privacy_policy`.
 The response includes a `manifest` block with source count, exported count,
 public/private export counts, skipped private count, blocked `zero-zero` count,
 integrity-failed block count, public reasoning redaction count, and removed
@@ -87,9 +91,10 @@ re-chained under the current hash contract, and written back to the durable
 check, startup fails closed instead of silently accepting a corrupted audit
 history.
 
-The `3.2.5` upgrade does not change stored audit entry shape or consensus
-identity. Existing durable entries are read as-is, and the training-corpus
-manifest is derived at export time from verified entries.
+The `3.2.5` and `3.2.6` upgrades do not change stored audit entry shape or
+consensus identity. Existing durable entries are read as-is, and the
+training-corpus manifest plus vision-safe metadata contract are derived at
+export time from verified entries.
 
 If the durable append fails, the API rolls back the in-memory latest entry and
 returns a 5xx instead of reporting an audit receipt that only exists in RAM.

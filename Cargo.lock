@@ -112,7 +112,7 @@ dependencies = [
 
 [[package]]
 name = "arobi-network"
-version = "3.2.5"
+version = "3.2.6"
 dependencies = [
  "anyhow",
  "async-stream",
