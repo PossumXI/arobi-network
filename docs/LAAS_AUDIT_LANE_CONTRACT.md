@@ -98,11 +98,15 @@ export time from verified entries.
 
 If the durable append fails, the API rolls back the in-memory latest entry and
 returns a 5xx instead of reporting an audit receipt that only exists in RAM.
-Audit ledger appends are serialized in process, so concurrent LaaS/Q workers do
-not race the block-height, previous-hash, latest-hash, or rollback boundary.
+
+As of `3.2.6`, audit appends are serialized across block-height allocation,
+previous-hash selection, latest-hash advancement, and entry insertion. This
+prevents concurrent LaaS audit writes from producing duplicate previous hashes
+or out-of-order in-memory chains under load.
 
 ## Operator Rule
 
 Do not change `NETWORK_MAGIC`, `NETWORK_VERSION`, or genesis block text for this
 migration. Those are consensus and history surfaces. This release changes the
 audit evidence contract, not the chain identity.
+
