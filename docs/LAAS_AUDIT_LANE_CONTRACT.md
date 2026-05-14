@@ -135,16 +135,20 @@ training exports skip these private records unless `include_internal=true`, and
 As of `3.2.10`, the coordinator no longer treats gradient quorum as completed
 training. Quorum now records `gradient_quorum_reached` with
 `aggregation_metric_status=pending_aggregation` and does not gossip
-`TrainingRoundComplete` until a future aggregation path can provide a real
-checkpoint id and real aggregated loss. This keeps Q training receipts truthful:
-collected gradients are auditable, but placeholder completion evidence is not
-created.
+`TrainingRoundComplete` from the quorum path. Completion requires
+`complete_round_after_aggregation(...)` with a real new checkpoint id, finite
+aggregated loss, aggregation hash, and checkpoint hash. That completion path
+then writes `round_completed` with `aggregation_metric_status=completed`,
+updates the checkpoint, clears pending gradients, and broadcasts
+`TrainingRoundComplete`. This keeps Q training receipts truthful: collected
+gradients are auditable, but placeholder completion evidence is not created.
 
 Verification:
 
 ```powershell
 cargo test --locked training_round_events_are_durably_audited_for_q_training
 cargo test --locked gradient_quorum_does_not_emit_completion_without_real_aggregation
+cargo test --locked completion_requires_real_aggregation_output
 cargo test --locked
 cargo clippy --locked -- -D warnings
 ```

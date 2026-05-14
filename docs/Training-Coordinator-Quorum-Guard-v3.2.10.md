@@ -19,8 +19,10 @@ corpus because downstream systems could learn false completion evidence.
   checkpoint input id, and gradient hashes without storing raw gradient payload
   bytes.
 - `TrainingRoundComplete` gossip is no longer broadcast from the quorum path.
-- `round_completed` audit evidence is reserved for a future real aggregation
-  completion path with an actual checkpoint and aggregated loss.
+- `complete_round_after_aggregation(...)` is the only completion path. It
+  requires an actual checkpoint id, finite aggregated loss, aggregation hash,
+  and checkpoint hash before it writes `round_completed` evidence or broadcasts
+  `TrainingRoundComplete`.
 
 ## Data Migration
 
@@ -40,6 +42,7 @@ New records use:
 
 ```powershell
 cargo test --locked gradient_quorum_does_not_emit_completion_without_real_aggregation
+cargo test --locked completion_requires_real_aggregation_output
 cargo test --locked training_round_events_are_durably_audited_for_q_training
 cargo fmt --all --check
 cargo check --locked

@@ -401,22 +401,13 @@ impl TrainingCoordinatorAgent {
                 ("required_workers".to_string(), required_workers.to_string()),
                 ("total_samples".to_string(), total_samples.to_string()),
                 ("gradient_hashes".to_string(), gradient_hashes.join(",")),
-                (
-                    "old_checkpoint_file_id".to_string(),
-                    old_checkpoint_file_id,
-                ),
+                ("old_checkpoint_file_id".to_string(), old_checkpoint_file_id),
                 (
                     "new_checkpoint_file_id".to_string(),
                     new_checkpoint_file_id.to_string(),
                 ),
-                (
-                    "aggregated_loss".to_string(),
-                    aggregated_loss.to_string(),
-                ),
-                (
-                    "aggregation_hash".to_string(),
-                    aggregation_hash.to_string(),
-                ),
+                ("aggregated_loss".to_string(), aggregated_loss.to_string()),
+                ("aggregation_hash".to_string(), aggregation_hash.to_string()),
                 ("checkpoint_hash".to_string(), checkpoint_hash.to_string()),
                 (
                     "aggregation_metric_status".to_string(),
@@ -686,6 +677,133 @@ mod tests {
         assert!(
             saw_round_start_gossip,
             "round start gossip should still be broadcast"
+        );
+
+        drop(coordinator);
+        drop(store);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn completion_requires_real_aggregation_output() {
+        let dir = temp_store_dir("completion-output");
+        let store = Arc::new(Store::open(&dir).expect("store should open"));
+        let chunk_store =
+            Arc::new(ChunkStore::open(&dir, store.db().clone()).expect("chunk store should open"));
+        let (block_tx, _) = broadcast::channel::<Block>(16);
+        let p2p = P2p::new(block_tx);
+        let audit_ledger = Arc::new(AuditLedger::new());
+        let coordinator = TrainingCoordinatorAgent::with_audit_sink(
+            chunk_store,
+            p2p.clone(),
+            "NODE_PUBLIC".to_string(),
+            audit_ledger.clone(),
+            store.clone(),
+        );
+        let mut events = coordinator.subscribe();
+        let mut gossip = p2p.subscribe_gossip();
+
+        let round_id = coordinator.start_round("q-main", "checkpoint-001", 1);
+        coordinator.receive_gradient(
+            "q-main",
+            round_id,
+            "worker-001",
+            "Z3JhZGllbnQ=",
+            128,
+            "gradient-hash-001",
+        );
+        coordinator
+            .complete_round_after_aggregation(
+                "q-main",
+                round_id,
+                "checkpoint-002",
+                0.123,
+                "aggregation-hash-001",
+                "checkpoint-hash-002",
+            )
+            .expect("real aggregation output should complete the round");
+
+        let mut saw_completed = false;
+        while let Ok(event) = events.try_recv() {
+            if let TrainingEvent::RoundCompleted(model_id, event_round_id, loss) = event {
+                saw_completed = model_id == "q-main"
+                    && event_round_id == round_id
+                    && (loss - 0.123).abs() < f64::EPSILON;
+            }
+        }
+        assert!(
+            saw_completed,
+            "completion event should be emitted only after real aggregation output"
+        );
+
+        let mut saw_completion_gossip = false;
+        while let Ok(message) = gossip.try_recv() {
+            if let crate::p2p::P2pMessage::TrainingRoundComplete {
+                model_id,
+                round_id: gossip_round_id,
+                new_checkpoint_file_id,
+                aggregated_loss,
+                participating_workers,
+            } = message
+            {
+                saw_completion_gossip = model_id == "q-main"
+                    && gossip_round_id == round_id
+                    && new_checkpoint_file_id == "checkpoint-002"
+                    && (aggregated_loss - 0.123).abs() < f64::EPSILON
+                    && participating_workers == vec!["worker-001".to_string()];
+            }
+        }
+        assert!(
+            saw_completion_gossip,
+            "completion gossip should carry the real checkpoint and worker list"
+        );
+
+        let status = coordinator
+            .training_status("q-main")
+            .expect("status should remain visible");
+        assert_eq!(status["checkpoint_file_id"], "checkpoint-002");
+        assert_eq!(status["pending_gradients"], 0);
+
+        let entries = store
+            .load_audit_entries()
+            .expect("audit entries should reload from durable store");
+        assert_eq!(entries.len(), 4);
+
+        let internal_export = audit_ledger.export_training_corpus_with_manifest(true);
+        let completion = internal_export
+            .records
+            .iter()
+            .find(|record| {
+                record.metadata.get("event").map(String::as_str) == Some("round_completed")
+            })
+            .expect("completion audit record should exist");
+        assert_eq!(
+            completion
+                .metadata
+                .get("aggregation_metric_status")
+                .map(String::as_str),
+            Some("completed")
+        );
+        assert_eq!(
+            completion
+                .metadata
+                .get("new_checkpoint_file_id")
+                .map(String::as_str),
+            Some("checkpoint-002")
+        );
+        assert_eq!(
+            completion
+                .metadata
+                .get("aggregation_hash")
+                .map(String::as_str),
+            Some("aggregation-hash-001")
+        );
+        assert_eq!(
+            completion
+                .metadata
+                .get("checkpoint_hash")
+                .map(String::as_str),
+            Some("checkpoint-hash-002")
         );
 
         drop(coordinator);
