@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use hex;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -107,8 +106,12 @@ pub fn tx_sign_msg(
     fee: u64,
     nonce: u64,
     timestamp: u64,
+    data: Option<&str>,
 ) -> Vec<u8> {
-    let s = format!("{from}{to}{amount}{fee}{nonce}{timestamp}");
+    let data_hash = data
+        .map(|payload| hex::encode(Sha256::digest(payload.as_bytes())))
+        .unwrap_or_default();
+    let s = format!("{from}{to}{amount}{fee}{nonce}{timestamp}{data_hash}");
     Sha256::digest(s.as_bytes()).to_vec()
 }
 

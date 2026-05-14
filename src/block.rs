@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// A signed value transfer on the Arobi Network.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
-    /// tx_id = hex(blake3( from||to||amount||fee||nonce||timestamp ))
+    /// tx_id = hex(blake3( from||to||amount||fee||nonce||timestamp||data_hash ))
     pub id: String,
     /// Sender AROBI address (or "GENESIS" for genesis/block-reward txs)
     pub from: String,
@@ -39,14 +39,19 @@ impl Transaction {
         fee: u64,
         nonce: u64,
         timestamp: u64,
+        data: Option<&str>,
     ) -> String {
-        let data = format!("{from}{to}{amount}{fee}{nonce}{timestamp}");
-        hex::encode(blake3::hash(data.as_bytes()).as_bytes())
+        let data_hash = data.map(|payload| blake3::hash(payload.as_bytes()).to_hex().to_string());
+        let signing_data = format!(
+            "{from}{to}{amount}{fee}{nonce}{timestamp}{}",
+            data_hash.as_deref().unwrap_or_default()
+        );
+        hex::encode(blake3::hash(signing_data.as_bytes()).as_bytes())
     }
 
     /// True if the Ed25519 signature is valid (genesis txs are always valid).
     pub fn verify_sig(&self) -> bool {
-        if self.from == "GENESIS" || self.from.starts_with("PUBLICP00L") {
+        if self.from == "GENESIS" || is_consensus_pool_address(&self.from) {
             return true;
         }
         let msg = crypto::tx_sign_msg(
@@ -56,6 +61,7 @@ impl Transaction {
             self.fee,
             self.nonce,
             self.timestamp,
+            self.data.as_deref(),
         );
         crypto::verify_tx_sig(&self.public_key, &self.signature, &msg)
     }
@@ -66,12 +72,13 @@ impl Transaction {
         if self.from == "GENESIS" {
             return Ok(());
         }
-        // PUBLIC_POOL transactions: valid without signature (no private key exists)
-        // Used for block rewards from the public node runner fund.
-        if self.from.starts_with("PUBLICP00L") {
-            // PUBLICP00L transactions must go TO a real wallet address (not back to itself)
-            if self.to.starts_with("PUBLICP00L") {
-                return Err("PUBLIC_POOL cannot transfer to itself");
+        // Consensus pool transactions are valid without a private-key signature.
+        if is_consensus_pool_address(&self.from) {
+            if is_consensus_pool_address(&self.to) {
+                return Err("Consensus pool cannot transfer to itself");
+            }
+            if !self.has_expected_id() {
+                return Err("Transaction id mismatch");
             }
             return Ok(());
         }
@@ -93,11 +100,31 @@ impl Transaction {
                 return Err("Data payload exceeds 512 bytes");
             }
         }
+        if !self.has_expected_id() {
+            return Err("Transaction id mismatch");
+        }
         if !self.verify_sig() {
             return Err("Invalid signature");
         }
         Ok(())
     }
+
+    fn has_expected_id(&self) -> bool {
+        self.id
+            == Self::compute_id(
+                &self.from,
+                &self.to,
+                self.amount,
+                self.fee,
+                self.nonce,
+                self.timestamp,
+                self.data.as_deref(),
+            )
+    }
+}
+
+fn is_consensus_pool_address(addr: &str) -> bool {
+    addr.starts_with("PUBLICP00L") || addr.starts_with("NODEOP00L")
 }
 
 // ─── Block ────────────────────────────────────────────────────────────────────
@@ -222,7 +249,8 @@ impl Block {
 ///   2. Mission Treasury:    4B AURA   (governance controlled)
 ///   3. Public Pool (DEX): 15B AURA   (DEX liquidity + bridge — governance controlled)
 ///   4. Node Ops Pool:      2.5B AURA (node runner rewards via PoI halving — NO single entity)
-/// Total: 22B genesis mint + 2B vesting = 24B AURA
+///
+/// Total: 22B genesis mint + 2B vesting = 24B AURA.
 pub fn genesis_block() -> Block {
     // Transaction IDs are sequential "GENESIS" + index
     fn gtx(id: &str, to: &str, amount: u64, data: &str) -> Transaction {
@@ -295,5 +323,112 @@ pub fn genesis_block() -> Block {
         validator_signature: "GENESIS".to_string(),
         nonce: 0,
         intelligence_proof: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::{self, Wallet};
+
+    #[test]
+    fn data_payload_is_bound_to_transaction_signature_and_id() {
+        let wallet = Wallet::generate();
+        let timestamp = genesis::TIMESTAMP_MS + 1;
+        let data = Some("public lane audit memo".to_string());
+        let mut tx = Transaction {
+            id: Transaction::compute_id(
+                &wallet.address,
+                "ARLPh1111111111111111111111111111111111111",
+                1,
+                genesis::MIN_FEE,
+                1,
+                timestamp,
+                data.as_deref(),
+            ),
+            from: wallet.address.clone(),
+            to: "ARLPh1111111111111111111111111111111111111".to_string(),
+            amount: 1,
+            fee: genesis::MIN_FEE,
+            nonce: 1,
+            data,
+            signature: String::new(),
+            public_key: wallet.verifying_key_hex.clone(),
+            timestamp,
+        };
+        let sign_msg = crypto::tx_sign_msg(
+            &tx.from,
+            &tx.to,
+            tx.amount,
+            tx.fee,
+            tx.nonce,
+            tx.timestamp,
+            tx.data.as_deref(),
+        );
+        tx.signature = wallet.sign(&sign_msg).expect("sign transaction");
+
+        assert!(tx.verify_sig());
+        assert!(tx.validate_basic().is_ok());
+
+        let mut tampered = tx.clone();
+        tampered.data = Some("00 lane audit memo".to_string());
+        assert!(
+            !tampered.verify_sig(),
+            "changing data must invalidate the transaction signature"
+        );
+        assert!(
+            tampered.validate_basic().is_err(),
+            "changing data must make transaction validation fail"
+        );
+        assert_ne!(
+            tx.id,
+            Transaction::compute_id(
+                &tampered.from,
+                &tampered.to,
+                tampered.amount,
+                tampered.fee,
+                tampered.nonce,
+                tampered.timestamp,
+                tampered.data.as_deref(),
+            ),
+            "changing data must produce a different transaction id"
+        );
+
+        let mut tampered = tx.clone();
+        tampered.id = "not-the-derived-transaction-id".to_string();
+        assert!(
+            tampered.validate_basic().is_err(),
+            "changing the transaction id must make validation fail"
+        );
+    }
+
+    #[test]
+    fn node_ops_pool_reward_is_valid_without_private_key_signature() {
+        let data = Some("PoI block reward h=1".to_string());
+        let tx = Transaction {
+            id: Transaction::compute_id(
+                genesis::NODE_OPS_POOL_ADDRESS,
+                "ARLPh1111111111111111111111111111111111111",
+                genesis::NODE_REWARD_MIN,
+                0,
+                1,
+                genesis::TIMESTAMP_MS + 1,
+                data.as_deref(),
+            ),
+            from: genesis::NODE_OPS_POOL_ADDRESS.to_string(),
+            to: "ARLPh1111111111111111111111111111111111111".to_string(),
+            amount: genesis::NODE_REWARD_MIN,
+            fee: 0,
+            nonce: 1,
+            data,
+            signature: genesis::NODE_OPS_POOL_ADDRESS.to_string(),
+            public_key: genesis::NODE_OPS_POOL_ADDRESS.to_string(),
+            timestamp: genesis::TIMESTAMP_MS + 1,
+        };
+
+        assert!(
+            tx.validate_basic().is_ok(),
+            "consensus node-ops reward pool has no private key and must validate through the pool rule"
+        );
     }
 }

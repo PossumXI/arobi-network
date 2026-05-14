@@ -488,8 +488,16 @@ impl Node {
         }
 
         // ── Audit Ledger for AI decisions ────────────────────────────────────────
-        let audit_ledger = Arc::new(AuditLedger::new());
-        info!("AI Decision Audit Ledger initialized");
+        let audit_entries = store.load_audit_entries()?;
+        let audit_ledger = Arc::new(AuditLedger::from_entries(audit_entries));
+        if audit_ledger.verify_chain() {
+            info!(
+                "AI Decision Audit Ledger initialized with {} durable entries",
+                audit_ledger.len()
+            );
+        } else {
+            warn!("AI Decision Audit Ledger loaded durable entries but chain verification failed");
+        }
 
         // ── HTTP API (runs in foreground, blocks until shutdown) ───────────────
         let api_state = AppState {

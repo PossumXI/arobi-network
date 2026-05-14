@@ -1,0 +1,72 @@
+# LaaS Audit Lane Contract
+
+Version: Arobi Network `3.2.2`
+
+Migration ID: `arobi-ledger-lane-v0.3-20260514`
+
+## Purpose
+
+LaaS audit records now carry an explicit lane contract so public, private, and
+zero-zero evidence can share one ledger format without sharing the same export
+or training policy.
+
+## Lanes
+
+| Lane | Export scope | Training policy | Retention class |
+| --- | --- | --- | --- |
+| `public` | `public-redacted` | `allowed-redacted` | `public-evidence` |
+| `private` | `operator-audit` | `allowed-internal` | `audit-evidence` |
+| `zero-zero` | `sealed` | `blocked` | `sealed-evidence` |
+
+`00`, `zero-zero`, `private-00`, `mission-control`, `mission-control-00`,
+`sealed`, `defense`, `defense-grade`, and any lane ending in `-00` normalize
+to `zero-zero`.
+
+## API Contract
+
+`POST /api/v1/audit/record` accepts optional fields:
+
+```json
+{
+  "lane": "public",
+  "metadata": {
+    "case_id": "example",
+    "source_route": "qline-status"
+  }
+}
+```
+
+If `lane` is omitted, Arobi derives the lane from `metadata.lane`,
+`metadata.arobi_lane`, `metadata.audit_lane`, `metadata.ability_profile`,
+`metadata.classification`, or finally `network_context`.
+
+`GET /api/v1/audit/lane/:lane_id` returns entries for a normalized lane. This is
+not a public API path; it remains behind the existing local-admin or API-token
+gate.
+
+`POST /api/v1/admin/sign` is also behind the local-admin or API-token gate. It
+must not be exposed as a public route because it signs canonical ledger payloads.
+
+## Integrity
+
+Audit verification now binds all material accountability fields into the entry
+hash: input summary, factors, ethics fields, subsystem list, network context,
+lane policy, requester/clearance, action/outcome, latency, and sorted metadata.
+Changing any of these fields after recording invalidates `verify()` and the
+ledger chain verification.
+
+## Durability
+
+`POST /api/v1/audit/record` now appends each audit entry to the sled
+`audit_entries` tree before returning success. Node startup reloads that tree
+into the in-process verifier, preserving audit count, block height, tip hash,
+lane policy, and chain verification across restarts.
+
+If the durable append fails, the API rolls back the in-memory latest entry and
+returns a 5xx instead of reporting an audit receipt that only exists in RAM.
+
+## Operator Rule
+
+Do not change `NETWORK_MAGIC`, `NETWORK_VERSION`, or genesis block text for this
+migration. Those are consensus and history surfaces. This release changes the
+audit evidence contract, not the chain identity.

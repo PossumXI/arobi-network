@@ -45,6 +45,16 @@ pub async fn produce_block(
     // This is the ONLY way tokens leave NODE_OPS_POOL — through consensus.
     let ops_pool_aura = ops_pool_balance as f64 / genesis::DECIMAL_FACTOR as f64;
     let reward_aura = reward_amount as f64 / genesis::DECIMAL_FACTOR as f64;
+    let reward_data = if reward_amount > 0 {
+        Some(format!(
+            "PoI block reward h={height} {:.2} AURA from Node Ops Pool. Pool: {:.0}AURA remaining. Halving exp={}",
+            reward_aura,
+            ops_pool_aura,
+            genesis::halving_exp(height)
+        ))
+    } else {
+        Some("Node Ops Pool exhausted — PoI block rewards ended at this block".to_string())
+    };
     let reward_tx = Transaction {
         id: Transaction::compute_id(
             genesis::NODE_OPS_POOL_ADDRESS,
@@ -53,22 +63,14 @@ pub async fn produce_block(
             0,
             height,
             timestamp,
+            reward_data.as_deref(),
         ),
         from: genesis::NODE_OPS_POOL_ADDRESS.to_string(),
         to: wallet.address.clone(),
         amount: reward_amount,
         fee: 0,
         nonce: height,
-        data: if reward_amount > 0 {
-            Some(format!(
-                "PoI block reward h={height} {:.2} AURA from Node Ops Pool. Pool: {:.0}AURA remaining. Halving exp={}",
-                reward_aura,
-                ops_pool_aura,
-                genesis::halving_exp(height)
-            ))
-        } else {
-            Some("Node Ops Pool exhausted — PoI block rewards ended at this block".to_string())
-        },
+        data: reward_data,
         signature: genesis::NODE_OPS_POOL_ADDRESS.to_string(),
         public_key: genesis::NODE_OPS_POOL_ADDRESS.to_string(),
         timestamp,

@@ -10,6 +10,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -249,8 +250,8 @@ fn xor_stream_cipher(data: &[u8], key: &[u8], nonce: &[u8]) -> Vec<u8> {
 
         let remaining = data.len() - out.len();
         let take = remaining.min(block_bytes.len());
-        for i in 0..take {
-            out.push(data[out.len()] ^ block_bytes[i]);
+        for byte in block_bytes.iter().take(take) {
+            out.push(data[out.len()] ^ *byte);
         }
         counter = counter.saturating_add(1);
     }
@@ -438,10 +439,7 @@ fn is_public_api_route(method: &Method, path: &str) -> bool {
         return is_public_api_path(path);
     }
 
-    (*method == Method::POST && path == "/api/v1/tx/submit")
-        || (*method == Method::POST && path == "/api/v1/autonomo/relay/send")
-        // Admin signing: safe to expose publicly — private key never leaves server
-        || (*method == Method::POST && path == "/api/v1/admin/sign")
+    *method == Method::POST && matches!(path, "/api/v1/tx/submit" | "/api/v1/autonomo/relay/send")
 }
 
 fn configured_api_token() -> Option<String> {
@@ -543,7 +541,15 @@ async fn submit_signed_transfer(
     let timestamp = chrono::Utc::now().timestamp() as u64;
 
     let mut tx = Transaction {
-        id: Transaction::compute_id(&signer_wallet.address, to, amount, fee, nonce, timestamp),
+        id: Transaction::compute_id(
+            &signer_wallet.address,
+            to,
+            amount,
+            fee,
+            nonce,
+            timestamp,
+            None,
+        ),
         from: signer_wallet.address.clone(),
         to: to.to_string(),
         amount,
@@ -555,7 +561,15 @@ async fn submit_signed_transfer(
         timestamp,
     };
 
-    let sign_msg = crypto::tx_sign_msg(&tx.from, &tx.to, tx.amount, tx.fee, tx.nonce, tx.timestamp);
+    let sign_msg = crypto::tx_sign_msg(
+        &tx.from,
+        &tx.to,
+        tx.amount,
+        tx.fee,
+        tx.nonce,
+        tx.timestamp,
+        tx.data.as_deref(),
+    );
     tx.signature = signer_wallet.sign(&sign_msg).map_err(internal)?;
     let tx_id = tx.id.clone();
 
@@ -762,7 +776,7 @@ async fn get_info(State(s): State<AppState>) -> ApiResult<NodeInfo> {
     let current_reward = genesis::current_block_reward(height, ops_pool_balance);
 
     Ok(Json(NodeInfo {
-        version: "3.2.0",
+        version: "3.2.2",
         network: genesis::NETWORK_MAGIC,
         protocol_version: genesis::NETWORK_VERSION,
         consensus_type: "proof_of_intelligence",
@@ -1010,7 +1024,7 @@ async fn submit_tx(
     Json(tx): Json<Transaction>,
 ) -> ApiResult<SubmitResp> {
     let id = tx.id.clone();
-    s.mempool.add(tx, &s.store).await.map_err(|e| bad_req(e))?;
+    s.mempool.add(tx, &s.store).await.map_err(bad_req)?;
     Ok(Json(SubmitResp {
         tx_id: id,
         status: "pending",
@@ -2128,7 +2142,7 @@ async fn autonomo_status(
 
     Ok(Json(AutonomoStatusResp {
         enabled: true,
-        version: "3.2.0",
+        version: "3.2.2",
         node_wallet: wallet,
         node_balance,
         node_public_key,
@@ -4357,6 +4371,10 @@ struct AuditRecordRequest {
     ethics_validated: bool,
     subsystems: Vec<String>,
     network_context: String,
+    #[serde(default)]
+    lane: Option<String>,
+    #[serde(default)]
+    metadata: HashMap<String, String>,
     latency_ms: f64,
 }
 
@@ -4402,7 +4420,12 @@ async fn audit_record_decision(
         _ => DecisionType::GeneralQuery,
     };
 
-    let entry = s.audit_ledger.record_decision(
+    let mut metadata = req.metadata;
+    if let Some(lane) = req.lane {
+        metadata.insert("lane".to_string(), lane);
+    }
+
+    let entry = s.audit_ledger.record_decision_with_metadata(
         source,
         decision_type,
         &req.model_id,
@@ -4417,7 +4440,16 @@ async fn audit_record_decision(
         req.subsystems,
         &req.network_context,
         req.latency_ms,
+        metadata,
     );
+
+    if let Err(err) = s.store.append_audit_entry(&entry) {
+        let _ = s.audit_ledger.rollback_latest(&entry.entry_id);
+        return Err(internal(format!(
+            "failed to durably append audit entry {}: {err}",
+            entry.entry_id
+        )));
+    }
 
     Ok(Json(AuditEntryResponse { entry }))
 }
@@ -4479,6 +4511,15 @@ async fn audit_get_by_type(
     Ok(Json(AuditEntriesResponse { entries, total }))
 }
 
+async fn audit_get_by_lane(
+    State(s): State<AppState>,
+    Path(lane_id): Path<String>,
+) -> ApiResult<AuditEntriesResponse> {
+    let entries = s.audit_ledger.get_entries_by_lane(&lane_id);
+    let total = entries.len();
+    Ok(Json(AuditEntriesResponse { entries, total }))
+}
+
 async fn audit_tribunal_export(State(s): State<AppState>) -> ApiResult<Vec<TribunalFormat>> {
     let entries = s.audit_ledger.get_all_for_tribunal();
     Ok(Json(entries))
@@ -4510,7 +4551,7 @@ async fn audit_forensics_export(State(s): State<AppState>) -> ApiResult<String> 
 // ─── Admin signing (for ledger write operations) ───────────────────────────
 
 /// Sign a transaction message for ledger embedding.
-/// Signs: sha256(from || to || amount || fee || nonce || timestamp)
+/// Signs: sha256(from || to || amount || fee || nonce || timestamp || data_hash)
 /// which matches the Arobi Network tx signature scheme.
 async fn admin_sign_message(
     State(state): State<AppState>,
@@ -4537,37 +4578,33 @@ async fn admin_sign_message(
     );
     let public = secret.verifying_key();
 
-    // Build the canonical signing message: sha256(from||to||amount||fee||nonce||timestamp)
-    let sign_msg = format!(
-        "{}{}{}{}{}{}",
-        payload.tx_from,
-        payload.tx_to,
+    let msg_hash = crypto::tx_sign_msg(
+        &payload.tx_from,
+        &payload.tx_to,
         payload.amount,
         payload.fee,
         payload.nonce,
-        payload.timestamp
+        payload.timestamp,
+        payload.data.as_deref(),
     );
-    let msg_hash = Sha256::digest(sign_msg.as_bytes());
     let signature = secret.sign(&msg_hash);
     let sig_hex = hex::encode(signature.to_bytes());
 
-    // Compute tx_id: blake3 hash of the transaction fields (for embedding in ledger)
-    let tx_id_str = format!(
-        "{}{}{}{}{}{}",
-        payload.tx_from,
-        payload.tx_to,
+    let tx_id = Transaction::compute_id(
+        &payload.tx_from,
+        &payload.tx_to,
         payload.amount,
         payload.fee,
         payload.nonce,
-        payload.timestamp
+        payload.timestamp,
+        payload.data.as_deref(),
     );
-    let tx_id = hex::encode(blake3::hash(tx_id_str.as_bytes()).as_bytes());
 
     Ok(Json(SignResponse {
         signature: sig_hex,
         public_key: hex::encode(public.as_bytes()),
         tx_id,
-        sign_msg: sign_msg,
+        sign_msg: hex::encode(msg_hash),
     }))
 }
 
@@ -4587,7 +4624,7 @@ struct SignResponse {
     signature: String,
     public_key: String,
     tx_id: String,
-    /// Ed25519 SHA-256 signing message (for reference/debugging)
+    /// Hex-encoded Ed25519 SHA-256 signing digest (for reference/debugging)
     sign_msg: String,
 }
 
@@ -4773,6 +4810,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/audit/entries/:entry_id", get(audit_get_entry))
         .route("/api/v1/audit/source/:source", get(audit_get_by_source))
         .route("/api/v1/audit/type/:decision_type", get(audit_get_by_type))
+        .route("/api/v1/audit/lane/:lane_id", get(audit_get_by_lane))
         .route("/api/v1/audit/tribunal", get(audit_tribunal_export))
         .route("/api/v1/audit/verify", get(audit_verify_chain))
         .route("/api/v1/audit/forensics", get(audit_forensics_export))
@@ -4835,4 +4873,19 @@ pub async fn serve(state: AppState, port: u16) {
     )
     .await
     .expect("API server crashed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn admin_signing_route_requires_local_or_token_access() {
+        assert!(!is_public_api_route(&Method::POST, "/api/v1/admin/sign"));
+        assert!(is_public_api_route(&Method::POST, "/api/v1/tx/submit"));
+        assert!(is_public_api_route(
+            &Method::POST,
+            "/api/v1/autonomo/relay/send"
+        ));
+    }
 }

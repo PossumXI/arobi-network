@@ -5,16 +5,16 @@ use std::collections::HashSet;
 use std::path::Path;
 use tracing::info;
 
+use crate::audit::ledger::AuditEntry;
 use crate::block::{genesis_block, Block, Transaction};
 use crate::config::genesis;
 use crate::crypto::Wallet;
 use crate::peer::{is_public_peer_endpoint, normalize_peer_endpoint};
 
-/// Returns true if the address is the PUBLIC_POOL burn address.
-/// PUBLICP00L has no private key — it can ONLY mint via consensus (block rewards).
-/// Normal senders cannot transfer FROM PUBLICP00L.
-fn is_public_pool_address(addr: &str) -> bool {
-    addr.starts_with("PUBLICP00L")
+/// Returns true if the address is a no-private-key consensus pool.
+/// Pool addresses can only spend through consensus-created transactions.
+fn is_consensus_pool_address(addr: &str) -> bool {
+    addr.starts_with("PUBLICP00L") || addr.starts_with("NODEOP00L")
 }
 
 const KNOWN_PEER_FAILURE_QUARANTINE_THRESHOLD: u64 = 3;
@@ -100,6 +100,9 @@ impl Store {
     }
     fn peer_book(&self) -> Result<sled::Tree> {
         Ok(self.db.open_tree("peer_book")?)
+    }
+    fn audit_entries(&self) -> Result<sled::Tree> {
+        Ok(self.db.open_tree("audit_entries")?)
     }
 
     fn write_genesis(&self, g: &Block) -> Result<()> {
@@ -206,6 +209,24 @@ impl Store {
         Ok(self.txs()?.contains_key(id.as_bytes())?)
     }
 
+    pub fn append_audit_entry(&self, entry: &AuditEntry) -> Result<()> {
+        self.audit_entries()?
+            .insert(entry.block_height.to_be_bytes(), serde_json::to_vec(entry)?)?;
+        self.db.flush()?;
+        Ok(())
+    }
+
+    pub fn load_audit_entries(&self) -> Result<Vec<AuditEntry>> {
+        let tree = self.audit_entries()?;
+        let mut entries: Vec<AuditEntry> = Vec::new();
+        for item in tree.iter() {
+            let (_, bytes) = item?;
+            entries.push(serde_json::from_slice(&bytes)?);
+        }
+        entries.sort_by_key(|entry| entry.block_height);
+        Ok(entries)
+    }
+
     // ── Block application ──────────────────────────────────────────────────────
 
     /// Validate all transactions against current state, then atomically commit
@@ -213,9 +234,8 @@ impl Store {
     ///
     /// Special addresses:
     /// - GENESIS:   Mint-only at block 0. Can fund accounts but never spends.
-    /// - PUBLICP00L: Burn address. No private key. Funds node runners via consensus.
-    ///               PUBLICP00L txs skip nonce checks and bypass balance checks
-    ///               (consensus caps reward at pool_balance).
+    /// - PUBLICP00L/NODEOP00L: no private key. Consensus-created pool txs skip
+    ///   nonce checks and debit only the pool balance.
     pub fn apply_block(&self, block: &Block) -> Result<()> {
         let cur_height = self.chain_height()?;
         if block.height != cur_height + 1 {
@@ -236,8 +256,8 @@ impl Store {
             std::collections::HashMap::new();
 
         for tx in &block.transactions {
-            // GENESIS and PUBLICP00L are special: no nonce, no balance check
-            if tx.from == "GENESIS" || is_public_pool_address(&tx.from) {
+            // GENESIS and consensus pools are special: no nonce or user signature.
+            if tx.from == "GENESIS" || is_consensus_pool_address(&tx.from) {
                 continue;
             }
             let expected_nonce = {
@@ -284,10 +304,9 @@ impl Store {
                 // Genesis mint: no sender debit, just credit recipient
                 let rbal = self.get_balance(&tx.to)?;
                 self.set_balance_raw(&tx.to, rbal + tx.amount)?;
-            } else if is_public_pool_address(&tx.from) {
-                // PUBLICP00L sends rewards to node runners.
-                // Consensus already capped the amount at pool_balance,
-                // so we only need to debit PUBLICP00L and credit recipient.
+            } else if is_consensus_pool_address(&tx.from) {
+                // Consensus pools send governance or node-ops emissions.
+                // Consensus already capped the amount at pool_balance.
                 let pool_bal = self.get_balance(&tx.from)?;
                 self.set_balance_raw(&tx.from, pool_bal.saturating_sub(tx.amount))?;
                 let rbal = self.get_balance(&tx.to)?;
@@ -1027,5 +1046,70 @@ impl Store {
             }
         }
         Ok(actions)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::ledger::{AuditLedger, DecisionSource, DecisionType};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_store_dir(name: &str) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "arobi-network-{name}-{}-{unique}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn audit_entries_survive_store_reopen_and_rehydrate_ledger() -> Result<()> {
+        let dir = temp_store_dir("audit-store");
+        let entry_id;
+
+        {
+            let store = Store::open(&dir)?;
+            let ledger = AuditLedger::new();
+            let entry = ledger.record_decision_with_metadata(
+                DecisionSource::Cortex,
+                DecisionType::NetworkRouting,
+                "q-ledger",
+                "1.0.0",
+                "Persist a public lane audit record",
+                b"persist a public lane audit record",
+                "persist",
+                0.94,
+                "The entry must survive process restart before public surfaces rely on it.",
+                vec!["durable_laas".to_string()],
+                true,
+                vec!["laas".to_string(), "arobi-network".to_string()],
+                "public",
+                18.0,
+                std::collections::HashMap::from([("lane".to_string(), "public".to_string())]),
+            );
+            entry_id = entry.entry_id.clone();
+            store.append_audit_entry(&entry)?;
+        }
+
+        {
+            let store = Store::open(&dir)?;
+            let entries = store.load_audit_entries()?;
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].entry_id, entry_id);
+            assert_eq!(entries[0].lane.lane_id, "public");
+
+            let ledger = AuditLedger::from_entries(entries);
+            assert_eq!(ledger.len(), 1);
+            assert!(ledger.verify_chain());
+            assert!(ledger.get_entry(&entry_id).is_some());
+        }
+
+        let _ = fs::remove_dir_all(dir);
+        Ok(())
     }
 }
