@@ -461,6 +461,16 @@ impl AuditLedger {
         }
     }
 
+    /// Rehydrate an audit ledger and reject tampered durable entries.
+    pub fn try_from_entries(entries: Vec<AuditEntry>) -> Result<Self, String> {
+        let ledger = Self::from_entries(entries);
+        if ledger.verify_chain() {
+            Ok(ledger)
+        } else {
+            Err("durable audit entry chain verification failed".to_string())
+        }
+    }
+
     /// Record a new decision
     #[allow(clippy::too_many_arguments)]
     pub fn record_decision(
@@ -970,6 +980,33 @@ mod tests {
         }
 
         assert!(!ledger.verify_chain());
+    }
+
+    #[test]
+    fn try_from_entries_rejects_tampered_durable_entries() {
+        let ledger = AuditLedger::new();
+        let mut entry = ledger.record_decision(
+            DecisionSource::Cortex,
+            DecisionType::NetworkRouting,
+            "q-ledger",
+            "1.0.0",
+            "Load durable audit evidence",
+            b"load durable audit evidence",
+            "load",
+            0.91,
+            "Durable audit evidence must verify before node startup.",
+            vec!["durable_verify".to_string()],
+            true,
+            vec!["laas".to_string()],
+            "public",
+            12.0,
+        );
+        entry.outcome = Some("tampered-after-write".to_string());
+
+        match AuditLedger::try_from_entries(vec![entry]) {
+            Ok(_) => panic!("tampered durable audit entries must be rejected"),
+            Err(err) => assert!(err.contains("verification failed")),
+        }
     }
 
     #[test]
