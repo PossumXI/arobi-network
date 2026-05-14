@@ -1,6 +1,6 @@
 # LaaS Audit Lane Contract
 
-Version: Arobi Network `3.2.9`
+Version: Arobi Network `3.2.10`
 
 Migration ID: `arobi-ledger-lane-v0.3-20260514`
 
@@ -100,7 +100,7 @@ re-chained under the current hash contract, and written back to the durable
 check, startup fails closed instead of silently accepting a corrupted audit
 history.
 
-The `3.2.5`, `3.2.6`, `3.2.7`, `3.2.8`, and `3.2.9` upgrades do not change
+The `3.2.5`, `3.2.6`, `3.2.7`, `3.2.8`, `3.2.9`, and `3.2.10` upgrades do not change
 stored audit entry shape or consensus identity. Existing durable entries are
 read as-is, and the training-corpus manifest plus vision-safe metadata contract
 are derived at export time from verified entries.
@@ -132,10 +132,19 @@ count, and gradient hash. It does not store raw gradient payload bytes. Public
 training exports skip these private records unless `include_internal=true`, and
 `zero-zero` export blocking remains unchanged.
 
+As of `3.2.10`, the coordinator no longer treats gradient quorum as completed
+training. Quorum now records `gradient_quorum_reached` with
+`aggregation_metric_status=pending_aggregation` and does not gossip
+`TrainingRoundComplete` until a future aggregation path can provide a real
+checkpoint id and real aggregated loss. This keeps Q training receipts truthful:
+collected gradients are auditable, but placeholder completion evidence is not
+created.
+
 Verification:
 
 ```powershell
 cargo test --locked training_round_events_are_durably_audited_for_q_training
+cargo test --locked gradient_quorum_does_not_emit_completion_without_real_aggregation
 cargo test --locked
 cargo clippy --locked -- -D warnings
 ```

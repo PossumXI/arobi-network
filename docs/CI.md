@@ -8,7 +8,9 @@ The CI gate is intentionally narrow and reproducible:
 - `cargo fmt --all --check`
 - `cargo check --locked`
 - `cargo test --locked`
+- `cargo clippy --locked -- -D warnings`
 
-This catches formatting drift, lockfile/build graph drift, and test regressions
-before changes reach `main`. Keep any future deployment or Railway-specific
-checks in separate workflows so this fast crate health gate stays easy to debug.
+This catches formatting drift, lockfile/build graph drift, test regressions, and
+warning-level code quality drift before changes reach `main`. Keep any future
+deployment or Railway-specific checks in separate workflows so this crate health
+gate stays easy to debug.

@@ -27,7 +27,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -40,3 +40,6 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+      - name: Run clippy
+        run: cargo clippy --locked -- -D warnings

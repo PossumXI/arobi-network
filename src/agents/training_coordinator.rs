@@ -18,9 +18,10 @@ use crate::store::Store;
 /// Events emitted by the TrainingCoordinator.
 #[derive(Debug, Clone)]
 pub enum TrainingEvent {
-    RoundStarted(String, u64),             // model_id, round_id
-    GradientReceived(String, u64, String), // model_id, round_id, worker
-    RoundCompleted(String, u64, f64),      // model_id, round_id, loss
+    RoundStarted(String, u64),                 // model_id, round_id
+    GradientReceived(String, u64, String),     // model_id, round_id, worker
+    GradientQuorumReached(String, u64, usize), // model_id, round_id, worker_count
+    RoundCompleted(String, u64, f64),          // model_id, round_id, loss
 }
 
 /// Gradient data received from a worker.
@@ -188,6 +189,7 @@ impl TrainingCoordinatorAgent {
                 return;
             }
 
+            let pending_before = state.pending_gradients.len();
             state.pending_gradients.push(PendingGradient {
                 worker: worker.to_string(),
                 gradient_data_b64: gradient_data_b64.to_string(),
@@ -234,33 +236,43 @@ impl TrainingCoordinatorAgent {
                 state.min_workers
             );
 
-            // Auto-finalize if enough gradients collected
-            if state.pending_gradients.len() >= state.min_workers {
+            let required_workers = state.min_workers.max(1);
+            if pending_before < required_workers
+                && state.pending_gradients.len() >= required_workers
+            {
                 let workers: Vec<String> = state
                     .pending_gradients
                     .iter()
                     .map(|g| g.worker.clone())
                     .collect();
+                let gradient_hashes: Vec<String> = state
+                    .pending_gradients
+                    .iter()
+                    .map(|g| g.gradient_hash.clone())
+                    .collect();
+                let total_samples: u64 =
+                    state.pending_gradients.iter().map(|g| g.num_samples).sum();
 
                 info!(
-                    "Finalizing round {round_id} for model {model_id} ({} workers)",
+                    "Gradient quorum reached for round {round_id} model {model_id}; aggregation pending ({} workers)",
                     workers.len()
                 );
 
-                let _ = self.event_tx.send(TrainingEvent::RoundCompleted(
+                let _ = self.event_tx.send(TrainingEvent::GradientQuorumReached(
                     model_id.to_string(),
                     round_id,
-                    0.0, // loss computed during actual aggregation
+                    workers.len(),
                 ));
 
                 self.record_training_audit_event(TrainingAuditEvent {
-                    event: "round_completed",
+                    event: "gradient_quorum_reached",
                     model_id,
                     round_id,
-                    decision: "Federated training round completed",
-                    confidence: 0.98,
+                    decision: "Federated training gradient quorum reached; aggregation pending",
+                    confidence: 0.97,
                     factors: vec![
                         format!("participating_workers:{}", workers.len()),
+                        format!("required_workers:{required_workers}"),
                         format!("checkpoint:{}", state.checkpoint_file_id),
                     ],
                     metadata: HashMap::from([
@@ -268,28 +280,161 @@ impl TrainingCoordinatorAgent {
                             "participating_workers_count".to_string(),
                             workers.len().to_string(),
                         ),
+                        ("required_workers".to_string(), required_workers.to_string()),
+                        ("total_samples".to_string(), total_samples.to_string()),
+                        ("gradient_hashes".to_string(), gradient_hashes.join(",")),
                         (
                             "checkpoint_file_id".to_string(),
                             state.checkpoint_file_id.clone(),
                         ),
                         (
                             "aggregation_metric_status".to_string(),
-                            "pending_real_aggregation_metric".to_string(),
+                            "pending_aggregation".to_string(),
                         ),
                     ]),
                 });
-
-                // Broadcast TrainingRoundComplete
-                self.p2p
-                    .broadcast_gossip(crate::p2p::P2pMessage::TrainingRoundComplete {
-                        model_id: model_id.to_string(),
-                        round_id,
-                        new_checkpoint_file_id: state.checkpoint_file_id.clone(),
-                        aggregated_loss: 0.0,
-                        participating_workers: workers,
-                    });
             }
         }
+    }
+
+    /// Complete a round after an external aggregation/checkpoint step produced
+    /// real output. Quorum alone is not completion.
+    pub fn complete_round_after_aggregation(
+        &self,
+        model_id: &str,
+        round_id: u64,
+        new_checkpoint_file_id: &str,
+        aggregated_loss: f64,
+        aggregation_hash: &str,
+        checkpoint_hash: &str,
+    ) -> Result<(), String> {
+        if new_checkpoint_file_id.trim().is_empty() {
+            return Err("new checkpoint file id is required".to_string());
+        }
+        if aggregation_hash.trim().is_empty() {
+            return Err("aggregation hash is required".to_string());
+        }
+        if checkpoint_hash.trim().is_empty() {
+            return Err("checkpoint hash is required".to_string());
+        }
+        if !aggregated_loss.is_finite() {
+            return Err("aggregated loss must be finite".to_string());
+        }
+
+        let (
+            old_checkpoint_file_id,
+            participating_workers,
+            worker_count,
+            required_workers,
+            total_samples,
+            gradient_hashes,
+        ) = {
+            let mut models = self.models.write();
+            let Some(state) = models.get_mut(model_id) else {
+                return Err(format!("model {model_id} has no active training round"));
+            };
+            if state.current_round != round_id {
+                return Err(format!(
+                    "completion for round {round_id} but current round is {}",
+                    state.current_round
+                ));
+            }
+
+            let required_workers = state.min_workers.max(1);
+            if state.pending_gradients.len() < required_workers {
+                return Err(format!(
+                    "completion requires {required_workers} worker gradient(s), found {}",
+                    state.pending_gradients.len()
+                ));
+            }
+
+            let old_checkpoint_file_id = state.checkpoint_file_id.clone();
+            let participating_workers: Vec<String> = state
+                .pending_gradients
+                .iter()
+                .map(|g| g.worker.clone())
+                .collect();
+            let total_samples: u64 = state.pending_gradients.iter().map(|g| g.num_samples).sum();
+            let gradient_hashes: Vec<String> = state
+                .pending_gradients
+                .iter()
+                .map(|g| g.gradient_hash.clone())
+                .collect();
+
+            state.checkpoint_file_id = new_checkpoint_file_id.to_string();
+            state.pending_gradients.clear();
+
+            (
+                old_checkpoint_file_id,
+                participating_workers,
+                gradient_hashes.len(),
+                required_workers,
+                total_samples,
+                gradient_hashes,
+            )
+        };
+
+        let _ = self.event_tx.send(TrainingEvent::RoundCompleted(
+            model_id.to_string(),
+            round_id,
+            aggregated_loss,
+        ));
+
+        self.record_training_audit_event(TrainingAuditEvent {
+            event: "round_completed",
+            model_id,
+            round_id,
+            decision: "Federated training round completed with real aggregation output",
+            confidence: 0.99,
+            factors: vec![
+                format!("participating_workers:{worker_count}"),
+                format!("required_workers:{required_workers}"),
+                format!("new_checkpoint:{new_checkpoint_file_id}"),
+                format!("aggregation_hash:{aggregation_hash}"),
+                format!("checkpoint_hash:{checkpoint_hash}"),
+            ],
+            metadata: HashMap::from([
+                (
+                    "participating_workers_count".to_string(),
+                    worker_count.to_string(),
+                ),
+                ("required_workers".to_string(), required_workers.to_string()),
+                ("total_samples".to_string(), total_samples.to_string()),
+                ("gradient_hashes".to_string(), gradient_hashes.join(",")),
+                (
+                    "old_checkpoint_file_id".to_string(),
+                    old_checkpoint_file_id,
+                ),
+                (
+                    "new_checkpoint_file_id".to_string(),
+                    new_checkpoint_file_id.to_string(),
+                ),
+                (
+                    "aggregated_loss".to_string(),
+                    aggregated_loss.to_string(),
+                ),
+                (
+                    "aggregation_hash".to_string(),
+                    aggregation_hash.to_string(),
+                ),
+                ("checkpoint_hash".to_string(), checkpoint_hash.to_string()),
+                (
+                    "aggregation_metric_status".to_string(),
+                    "completed".to_string(),
+                ),
+            ]),
+        });
+
+        self.p2p
+            .broadcast_gossip(crate::p2p::P2pMessage::TrainingRoundComplete {
+                model_id: model_id.to_string(),
+                round_id,
+                new_checkpoint_file_id: new_checkpoint_file_id.to_string(),
+                aggregated_loss,
+                participating_workers,
+            });
+
+        Ok(())
     }
 
     /// Get training status for a model.
@@ -450,7 +595,98 @@ mod tests {
             .metadata
             .get("event")
             .map(String::as_str)
-            == Some("round_completed")));
+            == Some("gradient_quorum_reached")));
+        assert!(internal_export.records.iter().all(|record| record
+            .metadata
+            .get("event")
+            .map(String::as_str)
+            != Some("round_completed")));
+        assert!(internal_export.records.iter().any(|record| record
+            .metadata
+            .get("aggregation_metric_status")
+            .map(String::as_str)
+            == Some("pending_aggregation")));
+
+        drop(coordinator);
+        drop(store);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn gradient_quorum_does_not_emit_completion_without_real_aggregation() {
+        let dir = temp_store_dir("quorum-not-complete");
+        let store = Arc::new(Store::open(&dir).expect("store should open"));
+        let chunk_store =
+            Arc::new(ChunkStore::open(&dir, store.db().clone()).expect("chunk store should open"));
+        let (block_tx, _) = broadcast::channel::<Block>(16);
+        let p2p = P2p::new(block_tx);
+        let coordinator =
+            TrainingCoordinatorAgent::new(chunk_store, p2p.clone(), "NODE_PUBLIC".to_string());
+        let mut events = coordinator.subscribe();
+        let mut gossip = p2p.subscribe_gossip();
+
+        let round_id = coordinator.start_round("q-main", "checkpoint-001", 1);
+        coordinator.receive_gradient(
+            "q-main",
+            round_id,
+            "worker-001",
+            "Z3JhZGllbnQ=",
+            128,
+            "gradient-hash-001",
+        );
+
+        let mut saw_started = false;
+        let mut saw_gradient = false;
+        let mut saw_quorum = false;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                TrainingEvent::RoundStarted(model_id, event_round_id) => {
+                    saw_started = model_id == "q-main" && event_round_id == round_id;
+                }
+                TrainingEvent::GradientReceived(model_id, event_round_id, worker) => {
+                    saw_gradient = model_id == "q-main"
+                        && event_round_id == round_id
+                        && worker == "worker-001";
+                }
+                TrainingEvent::GradientQuorumReached(model_id, event_round_id, worker_count) => {
+                    saw_quorum =
+                        model_id == "q-main" && event_round_id == round_id && worker_count == 1;
+                }
+                TrainingEvent::RoundCompleted(..) => {
+                    panic!("round completion must wait for real aggregation output")
+                }
+            }
+        }
+        assert!(saw_started, "round start event should still be emitted");
+        assert!(
+            saw_gradient,
+            "gradient receipt event should still be emitted"
+        );
+        assert!(
+            saw_quorum,
+            "quorum event should describe aggregation-pending state"
+        );
+
+        let mut saw_round_start_gossip = false;
+        while let Ok(message) = gossip.try_recv() {
+            match message {
+                crate::p2p::P2pMessage::TrainingRoundStart {
+                    model_id,
+                    round_id: gossip_round_id,
+                    ..
+                } => {
+                    saw_round_start_gossip = model_id == "q-main" && gossip_round_id == round_id;
+                }
+                crate::p2p::P2pMessage::TrainingRoundComplete { .. } => {
+                    panic!("completion gossip must wait for real aggregation output")
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            saw_round_start_gossip,
+            "round start gossip should still be broadcast"
+        );
 
         drop(coordinator);
         drop(store);

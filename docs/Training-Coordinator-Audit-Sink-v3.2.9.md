@@ -13,8 +13,9 @@ sealed `00` evidence or raw gradient payloads.
   training coordinator.
 - The training coordinator receives an audit sink backed by the same ledger and
   sled store used by `POST /api/v1/audit/record`.
-- Round start, gradient receipt, and round completion events write private-lane
-  `training_decision` audit entries.
+- Round start, gradient receipt, and quorum-state events write private-lane
+  `training_decision` audit entries. Follow-up release `3.2.10` intentionally
+  stops treating quorum as completion until real aggregation output exists.
 - Metadata records model id, round id, checkpoint id, worker count, sample count,
   and gradient hash. Raw gradient bytes are not recorded.
 - Public Q training exports skip these private records unless
