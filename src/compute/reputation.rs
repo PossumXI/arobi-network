@@ -68,14 +68,13 @@ impl ReputationRecord {
 
         // Latency bonus: lower is better, up to 10 points
         let latency_score = if self.avg_latency_ms > 0.0 {
-            (10.0 - self.avg_latency_ms / 1000.0).max(0.0).min(10.0)
+            (10.0 - self.avg_latency_ms / 1000.0).clamp(0.0, 10.0)
         } else {
             5.0
         };
 
         self.score = (success_rate * 0.5 + longevity + volume + latency_score - dispute_penalty)
-            .max(0.0)
-            .min(100.0);
+            .clamp(0.0, 100.0);
     }
 }
 

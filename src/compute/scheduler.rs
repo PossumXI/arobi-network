@@ -207,7 +207,7 @@ impl Scheduler {
         }
 
         // Find majority hash
-        let majority_threshold = (job.requirements.redundancy as usize + 1) / 2;
+        let majority_threshold = (job.requirements.redundancy as usize).div_ceil(2);
         let majority = hash_counts
             .iter()
             .find(|(_, &count)| count >= majority_threshold);

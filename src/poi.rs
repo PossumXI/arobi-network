@@ -323,7 +323,7 @@ impl PoiEngine {
     /// Adjust difficulty (called periodically based on network state).
     #[allow(dead_code)]
     pub fn adjust_difficulty(&self, new_difficulty: u32) {
-        let clamped = new_difficulty.max(100).min(1_000_000);
+        let clamped = new_difficulty.clamp(100, 1_000_000);
         *self.difficulty.write() = clamped;
         tracing::info!("PoI difficulty adjusted to {clamped}");
     }
@@ -393,11 +393,7 @@ impl IntelligenceModel for OptimizationModel {
 
         for (i, &val) in data.iter().enumerate() {
             running += val as u64;
-            let diff = if running > target {
-                running - target
-            } else {
-                target - running
-            };
+            let diff = running.abs_diff(target);
             if diff < best_diff {
                 best_diff = diff;
                 best_split = i;
@@ -546,7 +542,7 @@ impl IntelligenceModel for DataAnalysisModel {
         let data = &challenge.input_data;
 
         // Chunk the data and compute per-chunk averages
-        let chunk_size = 32.max(1);
+        let chunk_size = 32;
         let mut result = Vec::with_capacity(data.len() / chunk_size + 1);
 
         for chunk in data.chunks(chunk_size) {
@@ -676,8 +672,8 @@ impl IntelligenceModel for ComputeProofModel {
         let mut dot_products = Vec::new();
         for i in 0..num_rows.saturating_sub(1) {
             let mut dot: u64 = 0;
-            for j in 0..row_size.min(rows[i].len()).min(rows[i + 1].len()) {
-                dot += rows[i][j] as u64 * rows[i + 1][j] as u64;
+            for (&left, &right) in rows[i].iter().zip(rows[i + 1].iter()).take(row_size) {
+                dot += left as u64 * right as u64;
             }
             dot_products.push(dot);
         }
@@ -765,15 +761,19 @@ impl IntelligenceModel for InferenceProofModel {
                 let weight = score.exp().min(1e6);
                 total_weight += weight;
 
-                for d in 0..embedding_dim {
-                    weighted[d] += weight * embeddings[j][d];
+                for (acc, value) in weighted
+                    .iter_mut()
+                    .zip(embeddings[j].iter())
+                    .take(embedding_dim)
+                {
+                    *acc += weight * *value;
                 }
             }
 
             // Normalize
             if total_weight > 0.0 {
-                for d in 0..embedding_dim {
-                    weighted[d] /= total_weight;
+                for value in weighted.iter_mut().take(embedding_dim) {
+                    *value /= total_weight;
                 }
             }
             attention_output.push(weighted);

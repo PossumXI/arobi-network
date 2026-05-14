@@ -43,6 +43,7 @@ use crate::store::Store;
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
+#[allow(clippy::enum_variant_names)]
 pub enum AgentEvent {
     AgentStarted(String),
     AgentStopped(String),

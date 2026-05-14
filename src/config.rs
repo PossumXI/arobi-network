@@ -20,7 +20,7 @@ pub mod genesis {
     pub const NETWORK_MAGIC: &str = "AROBI1";
     pub const NETWORK_VERSION: u32 = 1;
     /// Genesis timestamp: 2026-03-22 00:00:00 UTC
-    pub const TIMESTAMP_MS: u64 = 1742611200_000;
+    pub const TIMESTAMP_MS: u64 = 1_742_611_200_000;
 
     // ── Token info ─────────────────────────────────────────────────────────
     /// AURA uses 8 decimal places (1 AURA = 100_000_000 base units)

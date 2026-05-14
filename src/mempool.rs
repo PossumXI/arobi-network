@@ -59,7 +59,7 @@ impl Mempool {
     pub async fn take_for_block(&self, limit: usize) -> Vec<Transaction> {
         let txs = self.txs.read().await;
         let mut sorted: Vec<&Transaction> = txs.values().collect();
-        sorted.sort_by(|a, b| b.fee.cmp(&a.fee));
+        sorted.sort_by_key(|tx| std::cmp::Reverse(tx.fee));
         sorted.into_iter().take(limit).cloned().collect()
     }
 

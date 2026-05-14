@@ -184,6 +184,7 @@ impl FederatedCoordinator {
 
     /// Whether a checkpoint should be saved after this round.
     pub fn should_checkpoint(&self) -> bool {
-        self.current_round % self.config.checkpoint_interval == 0
+        self.current_round
+            .is_multiple_of(self.config.checkpoint_interval)
     }
 }

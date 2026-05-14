@@ -174,7 +174,7 @@ impl DataLoader {
 
     /// Number of batches per epoch.
     pub fn batches_per_epoch(&self) -> usize {
-        (self.indices.len() + self.batch_size - 1) / self.batch_size
+        self.indices.len().div_ceil(self.batch_size)
     }
 
     /// Reset cursor for a new epoch (also shuffles).

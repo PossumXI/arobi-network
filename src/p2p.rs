@@ -507,7 +507,7 @@ impl P2p {
         let handshake_addr = advertised_addrs
             .first()
             .cloned()
-            .unwrap_or_else(|| String::new());
+            .unwrap_or_else(String::new);
         let hs = P2pMessage::Handshake {
             version: genesis::NETWORK_MAGIC.to_string(),
             height,

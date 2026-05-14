@@ -34,7 +34,7 @@ impl TensorDType {
         }
     }
 
-    pub fn to_candle_dtype(&self) -> DType {
+    pub fn to_candle_dtype(self) -> DType {
         match self {
             TensorDType::F32 => DType::F32,
             TensorDType::F16 => DType::F16,

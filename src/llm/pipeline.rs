@@ -86,13 +86,12 @@ impl PipelineCoordinator {
         }
 
         // Autoregressive generation loop
-        let mut offset = prompt_len;
-        for _ in 1..max_tokens {
+        let decode_steps = max_tokens.saturating_sub(1) as usize;
+        for offset in prompt_len..prompt_len + decode_steps {
             let last_token = *generated.last().unwrap();
             let input = Tensor::from_vec(vec![last_token], (1, 1), &self.device)?;
 
             let logits = model.forward(&input, &mut kv_caches, offset)?;
-            offset += 1;
 
             let token = sampler.sample(&logits)?;
             generated.push(token);

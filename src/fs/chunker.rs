@@ -111,10 +111,8 @@ impl Chunker {
 
         // Ensure missing shards are None (already handled above) but present
         // shards must have correct size
-        for shard in reconstruct_shards.iter_mut() {
-            if let Some(ref mut v) = shard {
-                v.resize(shard_size, 0);
-            }
+        for v in reconstruct_shards.iter_mut().flatten() {
+            v.resize(shard_size, 0);
         }
 
         // Reconstruct missing shards

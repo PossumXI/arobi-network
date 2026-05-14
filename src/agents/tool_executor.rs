@@ -459,19 +459,12 @@ impl ToolExecutorAgent {
         agent_wallet: &str,
         timeout_ms: u64,
     ) -> serde_json::Value {
-        let task_id = format!(
-            "task_{}",
-            blake3::hash(
-                format!(
-                    "{tool_name}:{agent_wallet}:{}",
-                    chrono::Utc::now().timestamp_millis()
-                )
-                .as_bytes()
-            )
-            .to_hex()
-            .to_string()[..16]
-                .to_string()
+        let task_seed = format!(
+            "{tool_name}:{agent_wallet}:{}",
+            chrono::Utc::now().timestamp_millis()
         );
+        let task_hash = blake3::hash(task_seed.as_bytes()).to_hex();
+        let task_id = format!("task_{}", &task_hash[..16]);
 
         let start = std::time::Instant::now();
 
@@ -878,7 +871,7 @@ impl ToolExecutorAgent {
         // Write headers
         let header_line: Vec<String> = headers
             .iter()
-            .filter_map(|v| v.as_str().map(|s| escape_csv(s)))
+            .filter_map(|v| v.as_str().map(escape_csv))
             .collect();
         csv_content.push_str(&header_line.join(","));
         csv_content.push('\n');

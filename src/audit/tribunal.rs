@@ -151,7 +151,7 @@ pub fn format_for_court(entries: &[super::TribunalFormat]) -> String {
             for factor in &entry.factors_considered {
                 report.push_str(&format!("  - {}\n", factor));
             }
-            report.push_str("\n");
+            report.push('\n');
         }
 
         report.push_str("ETHICS VALIDATION:\n");
@@ -162,14 +162,14 @@ pub fn format_for_court(entries: &[super::TribunalFormat]) -> String {
         if let Some(ref details) = entry.ethics_details {
             report.push_str(&format!("  Details: {}\n", details));
         }
-        report.push_str("\n");
+        report.push('\n');
 
         if !entry.subsystems_involved.is_empty() {
             report.push_str("SUBSYSTEMS INVOLVED:\n");
             for sub in &entry.subsystems_involved {
                 report.push_str(&format!("  - {}\n", sub));
             }
-            report.push_str("\n");
+            report.push('\n');
         }
 
         report.push_str("NETWORK CONTEXT:\n");
@@ -200,7 +200,7 @@ pub fn format_for_court(entries: &[super::TribunalFormat]) -> String {
             for (key, value) in &entry.metadata {
                 report.push_str(&format!("  {}: {}\n", key, value));
             }
-            report.push_str("\n");
+            report.push('\n');
         }
     }
 

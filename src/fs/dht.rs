@@ -110,7 +110,7 @@ impl DhtTable {
         }
 
         // Sort by distance (highest leading zeros = closest)
-        all_peers.sort_by(|a, b| b.0.cmp(&a.0));
+        all_peers.sort_by_key(|peer| std::cmp::Reverse(peer.0));
         all_peers
             .into_iter()
             .take(count)
