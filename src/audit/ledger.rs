@@ -347,6 +347,23 @@ impl AuditEntry {
         hex::encode(hasher.finalize())
     }
 
+    fn compute_legacy_pre_lane_hash(&self) -> String {
+        let mut hasher = Keccak256::new();
+        hasher.update(self.entry_id.as_bytes());
+        hasher.update(self.timestamp.to_rfc3339().as_bytes());
+        hasher.update(format!("{}", self.block_height).as_bytes());
+        hasher.update(self.previous_hash.as_bytes());
+        hasher.update(format!("{:?}", self.source).as_bytes());
+        hasher.update(format!("{:?}", self.decision_type).as_bytes());
+        hasher.update(self.model_id.as_bytes());
+        hasher.update(self.model_version.as_bytes());
+        hasher.update(self.input_hash.as_bytes());
+        hasher.update(self.decision.as_bytes());
+        hasher.update(format!("{}", self.confidence).as_bytes());
+        hasher.update(self.reasoning.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
     /// Verify the integrity of this entry
     pub fn verify(&self) -> bool {
         self.hash == self.compute_hash()
@@ -395,6 +412,60 @@ impl AuditEntry {
             metadata: self.metadata.clone(),
         }
     }
+}
+
+/// Upgrade legacy audit entries that were stored before lane policy was hash-bound.
+///
+/// Callers must mark entries whose serialized form was missing `lane`. Those
+/// entries are first checked against the pre-lane hash algorithm, then the
+/// entire chain is restamped with the current hash contract so durable startup
+/// verification can keep failing closed for genuinely tampered data.
+pub fn migrate_legacy_lane_entries(
+    mut entries: Vec<(AuditEntry, bool)>,
+) -> Result<(Vec<AuditEntry>, bool), String> {
+    entries.sort_by_key(|(entry, _)| entry.block_height);
+
+    let has_legacy_entry = entries.iter().any(|(_, missing_lane)| *missing_lane);
+    if !has_legacy_entry {
+        return Ok((entries.into_iter().map(|(entry, _)| entry).collect(), false));
+    }
+
+    let mut original_expected_previous_hash = "0".repeat(64);
+    let mut migrated_previous_hash = "0".repeat(64);
+    let mut migrated_entries = Vec::with_capacity(entries.len());
+
+    for (mut entry, missing_lane) in entries {
+        if entry.previous_hash != original_expected_previous_hash {
+            return Err(format!(
+                "legacy audit lane migration failed at block {}: previous hash mismatch",
+                entry.block_height
+            ));
+        }
+
+        let original_hash = entry.hash.clone();
+        if missing_lane {
+            let legacy_hash = entry.compute_legacy_pre_lane_hash();
+            if entry.hash != legacy_hash {
+                return Err(format!(
+                    "legacy audit lane migration failed at block {}: legacy hash mismatch",
+                    entry.block_height
+                ));
+            }
+        } else if !entry.verify() {
+            return Err(format!(
+                "legacy audit lane migration failed at block {}: current hash mismatch",
+                entry.block_height
+            ));
+        }
+
+        original_expected_previous_hash = original_hash;
+        entry.previous_hash = migrated_previous_hash;
+        entry.hash = entry.compute_hash();
+        migrated_previous_hash = entry.hash.clone();
+        migrated_entries.push(entry);
+    }
+
+    Ok((migrated_entries, true))
 }
 
 /// Tribunal-friendly formatted entry

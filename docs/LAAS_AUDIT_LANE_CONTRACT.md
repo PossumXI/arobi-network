@@ -1,6 +1,6 @@
 # LaaS Audit Lane Contract
 
-Version: Arobi Network `3.2.3`
+Version: Arobi Network `3.2.4`
 
 Migration ID: `arobi-ledger-lane-v0.3-20260514`
 
@@ -72,6 +72,13 @@ ledger chain verification.
 `audit_entries` tree before returning success. Node startup reloads that tree
 into the in-process verifier, preserving audit count, block height, tip hash,
 lane policy, and chain verification across restarts.
+
+During the `3.2.4` upgrade, entries written before lane policy existed are
+validated against the pre-lane hash contract, assigned the derived lane,
+re-chained under the current hash contract, and written back to the durable
+`audit_entries` tree. If a legacy entry fails its old hash or previous-hash
+check, startup fails closed instead of silently accepting a corrupted audit
+history.
 
 If the durable append fails, the API rolls back the in-memory latest entry and
 returns a 5xx instead of reporting an audit receipt that only exists in RAM.

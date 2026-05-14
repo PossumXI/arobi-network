@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sled::Db;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tracing::info;
 
-use crate::audit::ledger::AuditEntry;
+use crate::audit::ledger::{migrate_legacy_lane_entries, AuditEntry, AuditLane};
 use crate::block::{genesis_block, Block, Transaction};
 use crate::config::genesis;
 use crate::crypto::Wallet;
@@ -218,13 +218,47 @@ impl Store {
 
     pub fn load_audit_entries(&self) -> Result<Vec<AuditEntry>> {
         let tree = self.audit_entries()?;
-        let mut entries: Vec<AuditEntry> = Vec::new();
+        let mut entries: Vec<(AuditEntry, bool)> = Vec::new();
         for item in tree.iter() {
             let (_, bytes) = item?;
-            entries.push(serde_json::from_slice(&bytes)?);
+            let mut value: serde_json::Value = serde_json::from_slice(&bytes)?;
+            let missing_lane = value.get("lane").is_none();
+            if missing_lane {
+                let metadata = value
+                    .get("metadata")
+                    .cloned()
+                    .map(serde_json::from_value::<HashMap<String, String>>)
+                    .transpose()?
+                    .unwrap_or_default();
+                let network_context = value
+                    .get("network_context")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("private");
+                value["lane"] =
+                    serde_json::to_value(AuditLane::from_context(network_context, &metadata))?;
+            }
+
+            entries.push((serde_json::from_value(value)?, missing_lane));
         }
-        entries.sort_by_key(|entry| entry.block_height);
+
+        let (entries, migrated) = migrate_legacy_lane_entries(entries)
+            .map_err(|err| anyhow::anyhow!(err))
+            .context("Failed to migrate legacy audit lane entries")?;
+        if migrated {
+            self.replace_audit_entries(&entries)?;
+        }
+
         Ok(entries)
+    }
+
+    fn replace_audit_entries(&self, entries: &[AuditEntry]) -> Result<()> {
+        let tree = self.audit_entries()?;
+        tree.clear()?;
+        for entry in entries {
+            tree.insert(entry.block_height.to_be_bytes(), serde_json::to_vec(entry)?)?;
+        }
+        self.db.flush()?;
+        Ok(())
     }
 
     // ── Block application ──────────────────────────────────────────────────────
@@ -1053,6 +1087,7 @@ impl Store {
 mod tests {
     use super::*;
     use crate::audit::ledger::{AuditLedger, DecisionSource, DecisionType};
+    use sha3::{Digest, Keccak256};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1065,6 +1100,41 @@ mod tests {
             "arobi-network-{name}-{}-{unique}",
             std::process::id()
         ))
+    }
+
+    fn legacy_pre_lane_hash(entry: &AuditEntry) -> String {
+        let mut hasher = Keccak256::new();
+        hasher.update(entry.entry_id.as_bytes());
+        hasher.update(entry.timestamp.to_rfc3339().as_bytes());
+        hasher.update(format!("{}", entry.block_height).as_bytes());
+        hasher.update(entry.previous_hash.as_bytes());
+        hasher.update(format!("{:?}", entry.source).as_bytes());
+        hasher.update(format!("{:?}", entry.decision_type).as_bytes());
+        hasher.update(entry.model_id.as_bytes());
+        hasher.update(entry.model_version.as_bytes());
+        hasher.update(entry.input_hash.as_bytes());
+        hasher.update(entry.decision.as_bytes());
+        hasher.update(format!("{}", entry.confidence).as_bytes());
+        hasher.update(entry.reasoning.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
+    fn write_legacy_audit_entry_without_lane(store: &Store, mut entry: AuditEntry) -> Result<()> {
+        entry.hash = legacy_pre_lane_hash(&entry);
+        let legacy_hash = entry.hash.clone();
+        let mut value = serde_json::to_value(&entry)?;
+        value
+            .as_object_mut()
+            .expect("audit entry serializes as object")
+            .remove("lane");
+        value["hash"] = serde_json::Value::String(legacy_hash);
+
+        store.audit_entries()?.insert(
+            entry.block_height.to_be_bytes(),
+            serde_json::to_vec(&value)?,
+        )?;
+        store.db.flush()?;
+        Ok(())
     }
 
     #[test]
@@ -1107,6 +1177,82 @@ mod tests {
             assert_eq!(ledger.len(), 1);
             assert!(ledger.verify_chain());
             assert!(ledger.get_entry(&entry_id).is_some());
+        }
+
+        let _ = fs::remove_dir_all(dir);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_audit_entries_without_lane_are_migrated_on_load() -> Result<()> {
+        let dir = temp_store_dir("legacy-audit-lane");
+
+        {
+            let store = Store::open(&dir)?;
+            let first = AuditEntry::new_with_metadata(
+                1,
+                "0".repeat(64),
+                DecisionSource::Cortex,
+                DecisionType::NetworkRouting,
+                "q-ledger",
+                "0.3.1",
+                "Legacy public route",
+                b"legacy public route",
+                "allow_with_audit",
+                0.91,
+                "Older node recorded the decision before lane policy existed.",
+                vec!["legacy_route".to_string()],
+                true,
+                vec!["laas".to_string(), "arobi-network".to_string()],
+                "public",
+                21.0,
+                std::collections::HashMap::from([(
+                    "source_system".to_string(),
+                    "legacy-node".to_string(),
+                )]),
+            );
+            let first_legacy_hash = legacy_pre_lane_hash(&first);
+
+            let second = AuditEntry::new_with_metadata(
+                2,
+                first_legacy_hash,
+                DecisionSource::Ability,
+                DecisionType::TrainingDecision,
+                "q-ledger",
+                "0.3.1",
+                "Legacy sealed route",
+                b"legacy sealed route",
+                "block_training_export",
+                0.96,
+                "Older node recorded a sealed 00 decision before lane policy existed.",
+                vec!["sealed_route".to_string()],
+                true,
+                vec!["laas".to_string(), "zero-zero".to_string()],
+                "mission-control-00",
+                44.0,
+                std::collections::HashMap::from([(
+                    "source_system".to_string(),
+                    "legacy-node".to_string(),
+                )]),
+            );
+
+            write_legacy_audit_entry_without_lane(&store, first)?;
+            write_legacy_audit_entry_without_lane(&store, second)?;
+        }
+
+        {
+            let store = Store::open(&dir)?;
+            let entries = store.load_audit_entries()?;
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].lane.lane_id, "public");
+            assert_eq!(entries[1].lane.lane_id, "zero-zero");
+            assert!(entries.iter().all(AuditEntry::verify));
+            assert_eq!(entries[0].previous_hash, "0".repeat(64));
+            assert_eq!(entries[1].previous_hash, entries[0].hash);
+
+            let ledger = AuditLedger::try_from_entries(entries)
+                .expect("migrated legacy entries must rehydrate as a verified chain");
+            assert!(ledger.verify_chain());
         }
 
         let _ = fs::remove_dir_all(dir);
