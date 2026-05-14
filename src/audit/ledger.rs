@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 
 pub const AUDIT_LANE_MIGRATION_ID: &str = "arobi-ledger-lane-v0.3-20260514";
 
@@ -576,6 +576,7 @@ pub struct AuditLedger {
     pub entries: RwLock<Vec<AuditEntry>>,
     latest_hash: RwLock<String>,
     latest_block: RwLock<u64>,
+    append_lock: Mutex<()>,
 }
 
 impl AuditLedger {
@@ -585,6 +586,7 @@ impl AuditLedger {
             entries: RwLock::new(Vec::new()),
             latest_hash: RwLock::new("0".repeat(64)),
             latest_block: RwLock::new(0),
+            append_lock: Mutex::new(()),
         }
     }
 
@@ -601,6 +603,7 @@ impl AuditLedger {
             entries: RwLock::new(entries),
             latest_hash: RwLock::new(latest_hash),
             latest_block: RwLock::new(latest_block),
+            append_lock: Mutex::new(()),
         }
     }
 
@@ -672,6 +675,7 @@ impl AuditLedger {
         latency_ms: f64,
         metadata: HashMap<String, String>,
     ) -> AuditEntry {
+        let _append_guard = self.append_lock.lock().unwrap();
         let block_height = {
             let mut block = self.latest_block.write().unwrap();
             *block += 1;
@@ -717,6 +721,7 @@ impl AuditLedger {
 
     /// Roll back the latest entry after a failed durable append.
     pub fn rollback_latest(&self, entry_id: &str) -> bool {
+        let _append_guard = self.append_lock.lock().unwrap();
         let mut entries = self.entries.write().unwrap();
         let Some(last) = entries.last() else {
             return false;
@@ -1549,6 +1554,60 @@ mod tests {
         );
         assert_eq!(private_record.metadata.get("route").unwrap(), "operator");
         assert!(!private_record.metadata.contains_key("secret_key"));
+    }
+
+    #[test]
+    fn concurrent_record_decision_preserves_hash_chain() {
+        let ledger = std::sync::Arc::new(AuditLedger::new());
+        let workers = 12;
+        let records_per_worker = 20;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(workers));
+
+        let handles: Vec<_> = (0..workers)
+            .map(|worker| {
+                let ledger = ledger.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for index in 0..records_per_worker {
+                        ledger.record_decision_with_metadata(
+                            DecisionSource::Ability,
+                            DecisionType::TrainingDecision,
+                            "q-ledger",
+                            "3.2.6",
+                            &format!("Concurrent LaaS audit event {worker}-{index}"),
+                            format!("concurrent-laas-audit-event-{worker}-{index}").as_bytes(),
+                            "record-for-training-export",
+                            0.88,
+                            "Concurrent audit writes must preserve one canonical hash chain.",
+                            vec!["concurrency_guard".to_string(), "laas".to_string()],
+                            true,
+                            vec!["laas".to_string(), "q".to_string()],
+                            if worker % 2 == 0 { "public" } else { "private" },
+                            11.0,
+                            HashMap::from([("worker".to_string(), worker.to_string())]),
+                        );
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("concurrent audit append worker panicked");
+        }
+
+        assert_eq!(ledger.len(), workers * records_per_worker);
+        assert!(ledger.verify_chain());
+
+        let entries = ledger.entries.read().unwrap();
+        let mut previous_hash = "0".repeat(64);
+        for (index, entry) in entries.iter().enumerate() {
+            assert_eq!(entry.block_height, (index + 1) as u64);
+            assert_eq!(entry.previous_hash, previous_hash);
+            previous_hash = entry.hash.clone();
+        }
     }
 
     #[test]
